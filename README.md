@@ -34,6 +34,24 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 
 Consulta [RUNBOOK.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/RUNBOOK.md) para comandos completos por escenario.
 
+## Tests unitarios (backend)
+
+Instalacion:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+Ejecucion completa:
+
+```bash
+pytest
+```
+
+Nota: `pytest.ini` ya fuerza `-p no:capture` para evitar un `segfault` del plugin de captura en este entorno.
+
 ## OpenClawd WebSocket
 
 Configuracion detallada en [OPENCLAWD_WS_SETUP.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/OPENCLAWD_WS_SETUP.md).
