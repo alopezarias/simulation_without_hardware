@@ -4,14 +4,23 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 
 ## Componentes
 
-- `backend.py`: servidor WebSocket con FastAPI.
-- `openclawd_adapter.py`: adaptador encapsulado (modo `mock`, `http`/`real` o `ws`).
-- `speech_pipeline.py`: pipeline local de voz (Whisper STT + TTS local).
+- `app/backend.py`: fachada de compatibilidad del backend y entrypoint para `uvicorn app.backend:app`.
+- `app/`: arquitectura hexagonal (config, dominio, aplicacion, infraestructura).
+- `openclawd_adapter.py`: cliente OpenClawd usado por el adapter de infraestructura.
+- `speech_pipeline.py`: pipeline local de voz usado por el adapter de infraestructura.
 - `protocol.py`: utilidades de protocolo y estados compartidos.
 - `simulator.py`: simulador CLI.
 - `simulator_ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
 - `smoke_test.py`: prueba end-to-end automatizada.
 - `scenario_runner.py`: ejecutor de escenarios de simulacion repetibles (baseline/interrupcion/cancelacion).
+
+## Estructura hexagonal
+
+- `app/config/settings.py`: configuracion runtime desde entorno.
+- `app/domain/session.py`: estado de sesion del dispositivo.
+- `app/application/ports.py`: puertos de IA, voz, salida y audio-store.
+- `app/application/services/*`: casos de uso (`message_bus`, `recording`, `turn_processing`, `message_router`, `session_init`).
+- `app/infrastructure/*`: adapters concretos (WebSocket, OpenClawd, Speech, audio temporal, logging).
 
 ## Flujo MVP cubierto
 

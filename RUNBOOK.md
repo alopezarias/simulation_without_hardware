@@ -31,7 +31,7 @@ Nota: la primera transcripcion con Whisper descarga el modelo configurado (`WHIS
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-uvicorn backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 Modo `echo` (audio->texto->audio sin pasar por agente):
@@ -39,13 +39,13 @@ Modo `echo` (audio->texto->audio sin pasar por agente):
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo uvicorn backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 Si en macOS falla `pyttsx3`, fuerza el backend de voz nativo:
 
 ```bash
-ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo uvicorn backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 ## 2. Verificar backend vivo
@@ -140,7 +140,7 @@ Controles UI:
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-ENABLE_WHISPER_STT=true WHISPER_MODEL_SIZE=tiny ENABLE_LOCAL_TTS=true TTS_BACKEND=auto AUDIO_REPLY_MODE=echo python -m uvicorn backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_WHISPER_STT=true WHISPER_MODEL_SIZE=tiny ENABLE_LOCAL_TTS=true TTS_BACKEND=auto AUDIO_REPLY_MODE=echo python -m uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 2. Abre `simulator_ui.py`, habla y cierra con `Tap`.

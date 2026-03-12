@@ -1,7 +1,7 @@
 # ADR-0001: Fundaciones y Evolucion del Simulador sin Hardware
 
 - Estado: `accepted`
-- Fecha: `2026-03-12`
+- Fecha: `2026-03-13`
 - Alcance: `/simulation_without_hardware`
 - Audiencia: humana + agentes IA
 
@@ -19,7 +19,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 ### D1. Backend asincrono con FastAPI/WebSocket
 - Se adopta `FastAPI` + endpoint `/ws` para canal bidireccional estado-comandos-eventos.
 - Razon: simplicidad, latencia baja, y buena trazabilidad de eventos en tiempo real.
-- Implementacion: `backend.py`.
+- Implementacion: `app/backend.py`.
 
 ### D2. Protocolo explicito y compartido
 - Tipos de mensaje y estados comunes centralizados en `protocol.py`.
@@ -78,6 +78,12 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - Escenarios: `baseline`, `interrupt`, `cancel`, `audio-loopback`.
 - Razon: detectar regresiones de protocolo/estado/audio en cada iteracion.
 
+### D11. Refactor a arquitectura hexagonal (sin romper contrato)
+- Se desacopla `app/backend.py` en capas `config`, `domain`, `application`, `infrastructure` dentro de `app/`.
+- `app/backend.py` queda como fachada de compatibilidad + composition root (`uvicorn app.backend:app` se mantiene).
+- Puertos explicitos para IA, speech, salida a dispositivo y storage de audio temporal.
+- Razon: permitir enchufar/desenchufar motores de IA/adapters sin reescribir casos de uso.
+
 ## 4. Cronologia resumida
 
 ### Hito 1 (inicio MVP)
@@ -102,10 +108,20 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - Integracion TTS local (`say`/`pyttsx3`) con streaming de audio al simulador.
 - Se introduce modo `echo` para prueba definitiva audio->texto->audio.
 
+### Hito 6 (hexagonal definitivo)
+- Refactor de backend monolitico a modulos hexagonales en `app/`.
+- Se mantiene compatibilidad de contrato WS, estado y comandos.
+- Se conserva `app/backend.py` como entrada estable para despliegue y tests.
+
 ## 5. Snapshot tecnico actual
 
 ### Componentes
-- `backend.py`: orquestacion WS, estados, turnos, audio, integracion adapter/speech.
+- `app/backend.py`: fachada de compatibilidad y punto de entrada de despliegue.
+- `app/config/settings.py`: carga de configuracion runtime.
+- `app/domain/session.py`: entidad de sesion.
+- `app/application/ports.py`: puertos hexagonales.
+- `app/application/services/*`: casos de uso de sesion/recording/turno/ruteo.
+- `app/infrastructure/*`: adapters concretos (OpenClawd, Speech, WS, audio-store, logging).
 - `protocol.py`: tipos de mensaje y helpers.
 - `openclawd_adapter.py`: cliente de agente remoto (mock/http/ws).
 - `speech_pipeline.py`: STT/TTS local y conversion a PCM16.
@@ -178,6 +194,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 
 - Regresion de escenarios (`baseline`, `interrupt`, `cancel`, `audio-loopback`) pasando en modo base.
 - Modo `echo` validado con STT+TTS activos y audio de respuesta en chunks.
+- Suite unitaria backend actualizada y pasando (`42 passed`).
 - Documentacion operativa centralizada en `RUNBOOK.md`.
 
 ## 11. Contexto estructurado (para IA)
@@ -249,7 +266,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - `RUNBOOK.md`
 - `OPENCLAWD_WS_SETUP.md`
 - `MVP_ALIGNMENT.md`
-- `backend.py`
+- `app/backend.py`
 - `speech_pipeline.py`
 - `simulator_ui.py`
 - `openclawd_adapter.py`

@@ -55,7 +55,7 @@ OPENCLAWD_WS_SESSION_FIELD=session
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-uvicorn backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 En otra terminal:
