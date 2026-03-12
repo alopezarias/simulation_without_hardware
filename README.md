@@ -6,6 +6,7 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 
 - `backend.py`: servidor WebSocket con FastAPI.
 - `openclawd_adapter.py`: adaptador encapsulado (modo `mock`, `http`/`real` o `ws`).
+- `speech_pipeline.py`: pipeline local de voz (Whisper STT + TTS local).
 - `protocol.py`: utilidades de protocolo y estados compartidos.
 - `simulator.py`: simulador CLI.
 - `simulator_ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
@@ -19,6 +20,11 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 - `recording.start` / `recording.stop` / `recording.cancel`.
 - `debug.user_text` para fase de simulacion logica.
 - `audio.chunk` en streaming desde micro local (modo `mic` en UI).
+- `audio.chunk` en streaming desde micro local (auto al hacer `Tap`, y tambien con botones `Abrir Mic` / `Cerrar Mic`).
+- Reensamblado de audio en backend (archivo temporal PCM).
+- Transcripcion local con Whisper (`faster-whisper`) y sintesis local TTS (`pyttsx3`).
+- Streaming de audio de respuesta `assistant.audio.*` por chunks hacia el simulador.
+- Modo de respuesta configurable: `AUDIO_REPLY_MODE=assistant` (respuesta del agente) o `AUDIO_REPLY_MODE=echo` (repite lo transcrito en audio).
 - Respuesta en streaming con `assistant.text.partial` y `assistant.text.final`.
 - Interrupcion con `assistant.interrupt`.
 - Estados `idle`, `listening`, `processing`, `speaking`, `error`.
@@ -35,3 +41,7 @@ Configuracion detallada en [OPENCLAWD_WS_SETUP.md](/Users/user/Documents/project
 ## Encaje con especificacion final
 
 Consulta [MVP_ALIGNMENT.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/MVP_ALIGNMENT.md) para el contraste detallado entre este MVP y el documento final del proyecto.
+
+## ADR
+
+Documento de arquitectura y evolucion: [ADR-0001](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0001-foundations-and-evolution.md).

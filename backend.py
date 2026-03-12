@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +23,7 @@ from protocol import (
     require_fields,
     validate_device_message,
 )
+from speech_pipeline import SpeechPipeline
 
 load_dotenv()
 
@@ -33,8 +35,12 @@ logger = logging.getLogger("simulation-backend")
 
 app = FastAPI(title="Simulation Backend", version="0.2.0")
 adapter = OpenClawdAdapter()
+speech_pipeline = SpeechPipeline()
 
 ENABLE_FAKE_AUDIO = os.getenv("ENABLE_FAKE_AUDIO", "false").lower() == "true"
+LOOPBACK_AUDIO_ENABLED = os.getenv("LOOPBACK_AUDIO_ENABLED", "true").lower() == "true"
+LOOPBACK_CHUNK_MS = int(os.getenv("LOOPBACK_CHUNK_MS", "120"))
+AUDIO_REPLY_MODE = os.getenv("AUDIO_REPLY_MODE", "assistant").strip().lower()
 DEVICE_AUTH_TOKEN = os.getenv("SIM_DEVICE_AUTH_TOKEN", "").strip()
 AVAILABLE_AGENTS = [
     value.strip()
@@ -52,6 +58,16 @@ ALLOWED_DEVICE_IDS = {
 
 if not AVAILABLE_AGENTS:
     AVAILABLE_AGENTS = ["assistant-general"]
+
+if AUDIO_REPLY_MODE not in {"assistant", "echo"}:
+    logger.warning("Unknown AUDIO_REPLY_MODE=%s; forcing 'assistant'", AUDIO_REPLY_MODE)
+    AUDIO_REPLY_MODE = "assistant"
+
+logger.info(
+    "speech config loaded: reply_mode=%s capabilities=%s",
+    AUDIO_REPLY_MODE,
+    speech_pipeline.capabilities(),
+)
 
 
 @dataclass
@@ -71,10 +87,50 @@ class DeviceSession:
     recording_config: dict[str, Any] = field(default_factory=dict)
     audio_chunks_received: int = 0
     audio_bytes_received: int = 0
+    audio_file_path: str | None = None
+    audio_file_handle: Any | None = None
+
+
+def _sanitize_for_log(message: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(message)
+
+    payload = safe.get("payload")
+    if isinstance(payload, str) and payload:
+        safe["payload"] = f"<base64:{len(payload)} chars>"
+
+    text = safe.get("text")
+    if isinstance(text, str) and len(text) > 240:
+        safe["text"] = text[:240] + "...<trimmed>"
+
+    return safe
+
+
+def _close_audio_file(session: DeviceSession) -> None:
+    if session.audio_file_handle is None:
+        return
+
+    try:
+        session.audio_file_handle.close()
+    finally:
+        session.audio_file_handle = None
+
+
+def _cleanup_audio_file(session: DeviceSession) -> None:
+    _close_audio_file(session)
+    path = session.audio_file_path
+    session.audio_file_path = None
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.exception("Failed to delete temp audio file: %s", path)
 
 
 async def send(session: DeviceSession, message: dict[str, Any]) -> None:
-    logger.info("OUT -> %s", message)
+    logger.info("OUT -> %s", _sanitize_for_log(message))
     await session.websocket.send_json(message)
 
 
@@ -158,6 +214,11 @@ async def start_recording(session: DeviceSession, message: dict[str, Any]) -> No
     }
     session.audio_chunks_received = 0
     session.audio_bytes_received = 0
+    _cleanup_audio_file(session)
+    fd, audio_path = tempfile.mkstemp(prefix="sim_audio_", suffix=".pcm")
+    os.close(fd)
+    session.audio_file_path = audio_path
+    session.audio_file_handle = open(audio_path, "wb")
     await send_ui_state(session, UiState.LISTENING)
 
 
@@ -169,6 +230,7 @@ async def cancel_recording(session: DeviceSession) -> None:
     session.recording_config.clear()
     session.audio_chunks_received = 0
     session.audio_bytes_received = 0
+    _cleanup_audio_file(session)
     await send_ui_state(session, UiState.IDLE)
 
 
@@ -185,20 +247,233 @@ async def interrupt_assistant(session: DeviceSession) -> None:
     await send_ui_state(session, UiState.IDLE)
 
 
+async def stream_pcm_audio_file(
+    session: DeviceSession,
+    turn_id: str,
+    pcm_path: str,
+    *,
+    sample_rate: int,
+    channels: int,
+    source: str,
+    loopback: bool = False,
+) -> int:
+    codec = "pcm16"
+    bytes_per_second = max(1, sample_rate * channels * 2)
+    chunk_size = max(256, int(bytes_per_second * LOOPBACK_CHUNK_MS / 1000))
+    total_bytes = 0
+    seq = 0
+    timestamp_ms = 0
+
+    try:
+        total_bytes = os.path.getsize(pcm_path)
+    except OSError:
+        total_bytes = 0
+
+    try:
+        await send(
+            session,
+            build_message(
+                "assistant.audio.start",
+                turn_id=turn_id,
+                codec=codec,
+                sample_rate=sample_rate,
+                channels=channels,
+                source=source,
+                loopback=loopback,
+                total_bytes=total_bytes,
+            ),
+        )
+    except Exception as exc:
+        detail = str(exc).lower()
+        if "websocket.close" in detail or "response already completed" in detail:
+            session.interrupted.set()
+            raise asyncio.CancelledError() from exc
+        raise
+
+    try:
+        with open(pcm_path, "rb") as handle:
+            while True:
+                if session.interrupted.is_set():
+                    break
+
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+
+                duration_ms = max(1, int(len(chunk) * 1000 / bytes_per_second))
+                encoded = base64.b64encode(chunk).decode("ascii")
+                try:
+                    await send(
+                        session,
+                        build_message(
+                            "assistant.audio.chunk",
+                            turn_id=turn_id,
+                            seq=seq,
+                            timestamp_ms=timestamp_ms,
+                            duration_ms=duration_ms,
+                            payload=encoded,
+                            source=source,
+                            loopback=loopback,
+                        ),
+                    )
+                except Exception as exc:
+                    detail = str(exc).lower()
+                    if "websocket.close" in detail or "response already completed" in detail:
+                        session.interrupted.set()
+                        raise asyncio.CancelledError() from exc
+                    raise
+
+                seq += 1
+                timestamp_ms += duration_ms
+                await asyncio.sleep(duration_ms / 1000)
+    finally:
+        try:
+            await send(
+                session,
+                build_message(
+                    "assistant.audio.end",
+                    turn_id=turn_id,
+                    source=source,
+                    loopback=loopback,
+                    total_chunks=seq,
+                ),
+            )
+        except Exception:
+            # Socket may already be closed by the client.
+            pass
+
+    return seq
+
+
+async def stream_loopback_audio(session: DeviceSession, turn_id: str) -> bool:
+    if not LOOPBACK_AUDIO_ENABLED:
+        return False
+    if not session.audio_file_path:
+        return False
+    if session.audio_bytes_received <= 0:
+        return False
+
+    sample_rate = int(session.recording_config.get("sample_rate", 16000) or 16000)
+    channels = int(session.recording_config.get("channels", 1) or 1)
+    await stream_pcm_audio_file(
+        session,
+        turn_id,
+        session.audio_file_path,
+        sample_rate=sample_rate,
+        channels=channels,
+        source="device_audio",
+        loopback=True,
+    )
+    return True
+
+
+async def transcribe_recording(session: DeviceSession) -> str:
+    if not session.audio_file_path:
+        return ""
+    if session.audio_bytes_received <= 0:
+        return ""
+    if not speech_pipeline.stt_available:
+        return ""
+
+    sample_rate = int(session.recording_config.get("sample_rate", 16000) or 16000)
+    channels = int(session.recording_config.get("channels", 1) or 1)
+
+    try:
+        text = await asyncio.to_thread(
+            speech_pipeline.transcribe_pcm_file,
+            session.audio_file_path,
+            sample_rate,
+            channels,
+        )
+        logger.info(
+            "transcription completed device=%s session=%s turn=%s text_len=%s",
+            session.device_id,
+            session.session_id,
+            session.turn_id,
+            len(text),
+        )
+        return text
+    except Exception:
+        logger.exception(
+            "transcription failed device=%s session=%s turn=%s",
+            session.device_id,
+            session.session_id,
+            session.turn_id,
+        )
+        return ""
+
+
+async def synthesize_text_to_audio(session: DeviceSession, turn_id: str, text: str) -> bool:
+    cleaned = " ".join(text.split()).strip()
+    if not cleaned:
+        return False
+    if not speech_pipeline.tts_available:
+        return False
+
+    sample_rate = int(session.recording_config.get("sample_rate", 16000) or 16000)
+    channels = int(session.recording_config.get("channels", 1) or 1)
+    pcm_path: str | None = None
+    total_bytes = 0
+    try:
+        pcm_path, total_bytes = await asyncio.to_thread(
+            speech_pipeline.synthesize_text_to_pcm_file,
+            cleaned,
+            sample_rate,
+            channels,
+        )
+        if total_bytes <= 0:
+            return False
+
+        await stream_pcm_audio_file(
+            session,
+            turn_id,
+            pcm_path,
+            sample_rate=sample_rate,
+            channels=channels,
+            source="tts",
+        )
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "tts generation failed device=%s session=%s turn=%s",
+            session.device_id,
+            session.session_id,
+            session.turn_id,
+        )
+        return False
+    finally:
+        if pcm_path:
+            try:
+                os.remove(pcm_path)
+            except FileNotFoundError:
+                pass
+
+
 async def process_turn(session: DeviceSession) -> None:
     turn_id = session.turn_id or new_turn_id()
-    user_text = " ".join(fragment.strip() for fragment in session.text_fragments).strip()
+    typed_text = " ".join(fragment.strip() for fragment in session.text_fragments).strip()
     session.text_fragments.clear()
 
-    if not user_text:
-        if session.audio_bytes_received > 0:
-            kb = session.audio_bytes_received / 1024
-            user_text = (
-                f"(audio recibido: {kb:.1f} KB en "
-                f"{session.audio_chunks_received} chunks; transcripcion pendiente)"
-            )
-        else:
-            user_text = "(turno vacio)"
+    transcribed_text = ""
+    if session.audio_bytes_received > 0:
+        transcribed_text = await transcribe_recording(session)
+
+    if typed_text and transcribed_text:
+        user_text = f"{typed_text} {transcribed_text}".strip()
+    elif typed_text:
+        user_text = typed_text
+    elif transcribed_text:
+        user_text = transcribed_text
+    elif session.audio_bytes_received > 0:
+        kb = session.audio_bytes_received / 1024
+        user_text = (
+            f"(audio recibido: {kb:.1f} KB en "
+            f"{session.audio_chunks_received} chunks; transcripcion no disponible)"
+        )
+    else:
+        user_text = "(turno vacio)"
 
     await send(
         session,
@@ -211,11 +486,55 @@ async def process_turn(session: DeviceSession) -> None:
     await send_ui_state(session, UiState.SPEAKING)
 
     collected_chunks: list[str] = []
-    audio_started = False
+    loopback_used = False
+    tts_used = False
     started_at = session.turn_started_monotonic
 
     try:
-        if ENABLE_FAKE_AUDIO:
+        if AUDIO_REPLY_MODE == "echo":
+            final_text = user_text
+            if final_text:
+                await send(
+                    session,
+                    build_message(
+                        "assistant.text.partial",
+                        turn_id=turn_id,
+                        text=final_text,
+                        accumulated=final_text,
+                    ),
+                )
+        else:
+            async for chunk in adapter.stream_response(
+                agent_id=session.active_agent,
+                user_text=user_text,
+                session_id=session.session_id,
+            ):
+                if session.interrupted.is_set():
+                    break
+
+                collected_chunks.append(chunk)
+                partial_text = "".join(collected_chunks)
+                await send(
+                    session,
+                    build_message(
+                        "assistant.text.partial",
+                        turn_id=turn_id,
+                        text=chunk,
+                        accumulated=partial_text,
+                    ),
+                )
+
+            final_text = "".join(collected_chunks).strip()
+
+        if not final_text:
+            final_text = "(sin respuesta)"
+
+        tts_used = await synthesize_text_to_audio(session, turn_id, final_text)
+        if session.interrupted.is_set():
+            raise asyncio.CancelledError()
+
+        if not tts_used and ENABLE_FAKE_AUDIO:
+            encoded = base64.b64encode(final_text.encode("utf-8")).decode("ascii")
             await send(
                 session,
                 build_message(
@@ -224,49 +543,34 @@ async def process_turn(session: DeviceSession) -> None:
                     codec="pcm16",
                     sample_rate=16000,
                     channels=1,
+                    source="fake",
                 ),
             )
-            audio_started = True
-
-        seq = 0
-        timestamp_ms = 0
-        async for chunk in adapter.stream_response(
-            agent_id=session.active_agent,
-            user_text=user_text,
-            session_id=session.session_id,
-        ):
-            if session.interrupted.is_set():
-                break
-
-            collected_chunks.append(chunk)
-            partial_text = "".join(collected_chunks)
             await send(
                 session,
                 build_message(
-                    "assistant.text.partial",
+                    "assistant.audio.chunk",
                     turn_id=turn_id,
-                    text=chunk,
-                    accumulated=partial_text,
+                    seq=0,
+                    timestamp_ms=0,
+                    duration_ms=120,
+                    payload=encoded,
+                    source="fake",
                 ),
             )
+            await send(
+                session,
+                build_message("assistant.audio.end", turn_id=turn_id, source="fake", total_chunks=1),
+            )
 
-            if audio_started:
-                encoded = base64.b64encode(chunk.encode("utf-8")).decode("ascii")
-                await send(
-                    session,
-                    build_message(
-                        "assistant.audio.chunk",
-                        turn_id=turn_id,
-                        seq=seq,
-                        timestamp_ms=timestamp_ms,
-                        duration_ms=120,
-                        payload=encoded,
-                    ),
-                )
-                seq += 1
-                timestamp_ms += 120
+        if (
+            not session.interrupted.is_set()
+            and not tts_used
+            and session.audio_bytes_received > 0
+            and LOOPBACK_AUDIO_ENABLED
+        ):
+            loopback_used = await stream_loopback_audio(session, turn_id)
 
-        final_text = "".join(collected_chunks).strip()
         latency_ms: int | None = None
         if started_at is not None:
             latency_ms = int((time.monotonic() - started_at) * 1000)
@@ -283,12 +587,14 @@ async def process_turn(session: DeviceSession) -> None:
             ),
         )
         logger.info(
-            "turn.completed session=%s device=%s turn=%s interrupted=%s latency_ms=%s",
+            "turn.completed session=%s device=%s turn=%s interrupted=%s latency_ms=%s tts=%s loopback=%s",
             session.session_id,
             session.device_id,
             turn_id,
             session.interrupted.is_set(),
             latency_ms,
+            tts_used,
+            loopback_used,
         )
 
     except asyncio.CancelledError:
@@ -307,9 +613,6 @@ async def process_turn(session: DeviceSession) -> None:
         logger.exception("Error while processing turn")
         await send_error(session, f"Assistant generation failed: {exc}", code="assistant_error")
     finally:
-        if audio_started:
-            await send(session, build_message("assistant.audio.end", turn_id=turn_id))
-
         session.recording = False
         session.turn_id = None
         session.response_task = None
@@ -318,6 +621,7 @@ async def process_turn(session: DeviceSession) -> None:
         session.recording_config.clear()
         session.audio_chunks_received = 0
         session.audio_bytes_received = 0
+        _cleanup_audio_file(session)
         await send_ui_state(session, UiState.IDLE)
 
 
@@ -331,13 +635,15 @@ async def send_session_ready(session: DeviceSession) -> None:
             active_agent=session.active_agent,
             available_agents=AVAILABLE_AGENTS,
             protocol_version="0.2",
+            speech=speech_pipeline.capabilities(),
+            audio_reply_mode=AUDIO_REPLY_MODE,
         ),
     )
 
 
 async def handle_message(session: DeviceSession, message: dict[str, Any]) -> None:
     message_type = message["type"]
-    logger.info("IN  <- %s", message)
+    logger.info("IN  <- %s", _sanitize_for_log(message))
 
     if message_type == "device.hello":
         try:
@@ -388,14 +694,20 @@ async def handle_message(session: DeviceSession, message: dict[str, Any]) -> Non
 
         payload = message.get("payload")
         chunk_size_bytes = 0
+        decoded_chunk = b""
         if isinstance(payload, str) and payload.strip():
             try:
-                chunk_size_bytes = len(base64.b64decode(payload, validate=True))
+                decoded_chunk = base64.b64decode(payload, validate=True)
+                chunk_size_bytes = len(decoded_chunk)
             except Exception:
                 chunk_size_bytes = 0
+                decoded_chunk = b""
 
         if chunk_size_bytes <= 0:
             chunk_size_bytes = int(message.get("size_bytes", 0) or 0)
+
+        if decoded_chunk and session.audio_file_handle is not None:
+            session.audio_file_handle.write(decoded_chunk)
 
         session.audio_chunks_received += 1
         session.audio_bytes_received += max(0, chunk_size_bytes)
@@ -445,6 +757,7 @@ async def handle_message(session: DeviceSession, message: dict[str, Any]) -> Non
             await send_error(session, "Cannot stop recording because device is not listening.")
             return
 
+        _close_audio_file(session)
         session.recording = False
         await send_ui_state(session, UiState.PROCESSING)
 
@@ -498,6 +811,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await session.response_task
             except asyncio.CancelledError:
                 pass
+        _cleanup_audio_file(session)
 
 
 @app.get("/health")
@@ -507,4 +821,6 @@ async def health() -> dict[str, Any]:
         "protocol_version": "0.2",
         "available_agents": AVAILABLE_AGENTS,
         "auth_token_required": bool(DEVICE_AUTH_TOKEN),
+        "audio_reply_mode": AUDIO_REPLY_MODE,
+        "speech": speech_pipeline.capabilities(),
     }

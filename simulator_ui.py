@@ -45,6 +45,9 @@ LCD_CORNER_HEIGHT = 20
 MIC_SAMPLE_RATE = 16000
 MIC_CHANNELS = 1
 MIC_CHUNK_MS = 120
+MAX_CHUNKS_PER_FLUSH = 6
+MAX_LOG_LINES = 800
+MAX_WIRE_LINES = 1800
 
 STATE_LABELS = {
     UiState.IDLE: "LISTO",
@@ -197,16 +200,20 @@ class MicAudioStreamer:
         sample_rate: int = MIC_SAMPLE_RATE,
         channels: int = MIC_CHANNELS,
         chunk_ms: int = MIC_CHUNK_MS,
+        max_queue_chunks: int = 80,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_ms = chunk_ms
         self.frames_per_chunk = max(1, int(sample_rate * chunk_ms / 1000))
-        self._queue: queue.Queue[bytes] = queue.Queue()
+        self.max_queue_chunks = max(4, max_queue_chunks)
+        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self.max_queue_chunks)
         self._stream: Any | None = None
         self._started_monotonic: float = 0.0
         self._seq: int = 0
         self._bytes_sent: int = 0
+        self.device_index: int | None = None
+        self._dropped_chunks: int = 0
 
     @property
     def active(self) -> bool:
@@ -216,6 +223,10 @@ class MicAudioStreamer:
     def bytes_sent(self) -> int:
         return self._bytes_sent
 
+    @property
+    def dropped_chunks(self) -> int:
+        return self._dropped_chunks
+
     def start(self) -> None:
         if not SOUNDDEVICE_AVAILABLE:
             raise RuntimeError(
@@ -224,9 +235,10 @@ class MicAudioStreamer:
         if self.active:
             return
 
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=self.max_queue_chunks)
         self._seq = 0
         self._bytes_sent = 0
+        self._dropped_chunks = 0
         self._started_monotonic = time.monotonic()
 
         def _callback(indata: Any, frames: int, _time: Any, status: Any) -> None:
@@ -235,13 +247,30 @@ class MicAudioStreamer:
                 pass
             if frames <= 0:
                 return
-            self._queue.put(bytes(indata.tobytes()))
+            pcm_bytes = bytes(indata.tobytes())
+            if not pcm_bytes:
+                return
+
+            try:
+                self._queue.put_nowait(pcm_bytes)
+            except queue.Full:
+                # Keep bounded memory: drop oldest chunk when UI loop cannot keep up.
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._queue.put_nowait(pcm_bytes)
+                except queue.Full:
+                    pass
+                self._dropped_chunks += 1
 
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="int16",
             blocksize=self.frames_per_chunk,
+            device=self.device_index,
             callback=_callback,
         )
         self._stream.start()
@@ -256,9 +285,9 @@ class MicAudioStreamer:
             self._stream.close()
             self._stream = None
 
-    def pop_chunks(self) -> list[dict[str, Any]]:
+    def pop_chunks(self, max_chunks: int | None = None) -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
-        while True:
+        while max_chunks is None or len(chunks) < max_chunks:
             try:
                 pcm_bytes = self._queue.get_nowait()
             except queue.Empty:
@@ -285,6 +314,77 @@ class MicAudioStreamer:
         return chunks
 
 
+class AudioOutputPlayer:
+    """Play PCM16 audio chunks arriving from backend."""
+
+    def __init__(self) -> None:
+        self.sample_rate = MIC_SAMPLE_RATE
+        self.channels = MIC_CHANNELS
+        self._stream: Any | None = None
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._max_buffer_bytes = self.sample_rate * self.channels * 2 * 8
+
+    @property
+    def active(self) -> bool:
+        return self._stream is not None
+
+    @property
+    def buffered_bytes(self) -> int:
+        with self._lock:
+            return len(self._buffer)
+
+    def start(self, sample_rate: int, channels: int) -> None:
+        if not SOUNDDEVICE_AVAILABLE:
+            return
+
+        self.stop(clear_buffer=True)
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self._max_buffer_bytes = max(2048, self.sample_rate * self.channels * 2 * 8)
+
+        def _callback(outdata: Any, frames: int, _time: Any, status: Any) -> None:
+            if status:
+                pass
+            need = len(outdata)
+            if need <= 0:
+                return
+            with self._lock:
+                outdata[:] = b"\x00" * need
+                take = min(need, len(self._buffer))
+                if take > 0:
+                    outdata[:take] = self._buffer[:take]
+                    del self._buffer[:take]
+
+        self._stream = sd.RawOutputStream(
+            samplerate=self.sample_rate,
+            channels=self.channels,
+            dtype="int16",
+            callback=_callback,
+        )
+        self._stream.start()
+
+    def push(self, pcm_bytes: bytes) -> None:
+        if not pcm_bytes or not self.active:
+            return
+        with self._lock:
+            self._buffer.extend(pcm_bytes)
+            overflow = len(self._buffer) - self._max_buffer_bytes
+            if overflow > 0:
+                del self._buffer[:overflow]
+
+    def stop(self, clear_buffer: bool = True) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+            finally:
+                self._stream.close()
+                self._stream = None
+        if clear_buffer:
+            with self._lock:
+                self._buffer.clear()
+
+
 class SimulatorUi:
     def __init__(self, root: tk.Tk, ws_url: str, device_id: str, auth_token: str) -> None:
         self.root = root
@@ -307,7 +407,14 @@ class SimulatorUi:
         self.state_var = tk.StringVar(value=self.state.ui_state.value)
         self.turn_var = tk.StringVar(value="-")
         self.latency_var = tk.StringVar(value="-")
+        self.mic_status_var = tk.StringVar(value="OFF")
+        self.audio_chunks_var = tk.StringVar(value="0")
+        self.audio_kb_var = tk.StringVar(value="0.0 KB")
+        self.audio_rx_chunks_var = tk.StringVar(value="0")
+        self.audio_rx_kb_var = tk.StringVar(value="0.0 KB")
+        self.audio_playback_var = tk.StringVar(value="OFF")
         self.note_var = tk.StringVar(value="Ready")
+        self.mic_error_var = tk.StringVar(value="-")
         self.battery_var = tk.DoubleVar(value=self.state.battery_level)
         self.battery_label_var = tk.StringVar(value=f"{int(self.state.battery_level)}%")
         self.preview_mode_var = tk.StringVar(
@@ -319,9 +426,18 @@ class SimulatorUi:
         self._simulation_running = False
         self._simulation_after_ids: list[str] = []
         self._mic_streamer = MicAudioStreamer()
+        self._audio_player = AudioOutputPlayer()
+        self._turn_audio_chunks_sent = 0
+        self._turn_audio_bytes_sent = 0
+        self._turn_audio_chunks_rx = 0
+        self._turn_audio_bytes_rx = 0
+        self._audio_end_pending = False
+        self._mic_input_devices: list[tuple[int, str]] = []
+        self.mic_device_var = tk.StringVar(value="")
 
         self._build_layout()
         self._bind_keys()
+        self.refresh_mic_devices()
 
         self.worker.start()
         self._poll_inbox()
@@ -353,6 +469,34 @@ class SimulatorUi:
 
         ttk.Label(summary, text="Latencia:").grid(row=5, column=0, sticky="w", padx=(0, 8))
         ttk.Label(summary, textvariable=self.latency_var).grid(row=5, column=1, sticky="w")
+
+        ttk.Label(summary, text="Mic:").grid(row=6, column=0, sticky="w", padx=(0, 8))
+        mic_row = ttk.Frame(summary)
+        mic_row.grid(row=6, column=1, sticky="w")
+        ttk.Label(mic_row, textvariable=self.mic_status_var).pack(side=tk.LEFT)
+        self.mic_canvas = tk.Canvas(mic_row, width=14, height=14, highlightthickness=0)
+        self.mic_canvas.pack(side=tk.LEFT, padx=(8, 0))
+        self.mic_dot = self.mic_canvas.create_oval(2, 2, 12, 12, fill="#4b5563", outline="")
+
+        ttk.Label(summary, text="Chunks TX:").grid(row=7, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.audio_chunks_var).grid(row=7, column=1, sticky="w")
+
+        ttk.Label(summary, text="Audio TX:").grid(row=8, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.audio_kb_var).grid(row=8, column=1, sticky="w")
+
+        ttk.Label(summary, text="Chunks RX:").grid(row=9, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.audio_rx_chunks_var).grid(row=9, column=1, sticky="w")
+
+        ttk.Label(summary, text="Audio RX:").grid(row=10, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.audio_rx_kb_var).grid(row=10, column=1, sticky="w")
+
+        ttk.Label(summary, text="Audio OUT:").grid(row=11, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.audio_playback_var).grid(row=11, column=1, sticky="w")
+
+        ttk.Label(summary, text="Mic Error:").grid(row=12, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(summary, textvariable=self.mic_error_var, foreground="#ef4444").grid(
+            row=12, column=1, sticky="w"
+        )
 
         hat_preview = ttk.LabelFrame(top, text="Mini pantalla estilo HAT", padding=10)
         hat_preview.pack(side=tk.LEFT, padx=(12, 0))
@@ -412,6 +556,20 @@ class SimulatorUi:
         ttk.Button(controls, text="Cerrar Mic", command=self.on_close_mic).grid(
             row=0, column=6, padx=4, pady=4
         )
+        ttk.Button(controls, text="Refrescar Mic", command=self.refresh_mic_devices).grid(
+            row=0, column=7, padx=4, pady=4
+        )
+
+        ttk.Label(controls, text="Dispositivo Mic").grid(row=1, column=5, padx=(8, 4), pady=(8, 0), sticky="e")
+        self.mic_device_combo = ttk.Combobox(
+            controls,
+            state="readonly",
+            textvariable=self.mic_device_var,
+            values=[],
+            width=28,
+        )
+        self.mic_device_combo.grid(row=1, column=6, columnspan=2, padx=(0, 4), pady=(8, 0), sticky="w")
+        self.mic_device_combo.bind("<<ComboboxSelected>>", self.on_mic_device_change)
 
         ttk.Label(controls, text="Vista").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(8, 0))
         preview_combo = ttk.Combobox(
@@ -436,7 +594,7 @@ class SimulatorUi:
         ttk.Label(controls, textvariable=self.battery_label_var).grid(row=1, column=4, sticky="e", pady=(8, 0))
 
         ttk.Label(controls, text="Teclado: Space=tap, doble Space=double, Esc=long").grid(
-            row=2, column=0, columnspan=7, sticky="w", pady=(8, 0)
+            row=2, column=0, columnspan=8, sticky="w", pady=(8, 0)
         )
 
         ttk.Label(controls, text="Simulaciones").grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -502,11 +660,34 @@ class SimulatorUi:
         line = f"[{timestamp}] {message}\n"
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, line)
+        line_count = int(float(self.log_text.index("end-1c").split(".")[0]))
+        if line_count > MAX_LOG_LINES:
+            overflow = line_count - MAX_LOG_LINES
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
+    def _wire_safe_payload(self, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+
+        safe = dict(payload)
+        msg_type = str(safe.get("type", ""))
+        if msg_type in {"audio.chunk", "assistant.audio.chunk"} and isinstance(
+            safe.get("payload"), str
+        ):
+            raw = safe["payload"]
+            safe["payload"] = f"<base64:{len(raw)} chars>"
+
+        text = safe.get("text")
+        if isinstance(text, str) and len(text) > 220:
+            safe["text"] = text[:220] + "...<trimmed>"
+
+        return safe
+
     def _append_wire(self, direction: str, payload: Any) -> None:
         timestamp = time.strftime("%H:%M:%S")
+        payload = self._wire_safe_payload(payload)
         if isinstance(payload, (dict, list)):
             text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         else:
@@ -516,6 +697,10 @@ class SimulatorUi:
         self.wire_text.configure(state=tk.NORMAL)
         tag = direction if direction in {"TX", "RX", "SYS", "TX-BLOCKED"} else ""
         self.wire_text.insert(tk.END, line, tag)
+        line_count = int(float(self.wire_text.index("end-1c").split(".")[0]))
+        if line_count > MAX_WIRE_LINES:
+            overflow = line_count - MAX_WIRE_LINES
+            self.wire_text.delete("1.0", f"{overflow + 1}.0")
         self.wire_text.see(tk.END)
         self.wire_text.configure(state=tk.DISABLED)
 
@@ -676,6 +861,7 @@ class SimulatorUi:
         c = self.hat_canvas
         w = self.hat_canvas_width
         h = self.hat_canvas_height
+        mic_active = self._mic_streamer.active and self.state.ui_state == UiState.LISTENING
 
         c.delete("all")
 
@@ -760,17 +946,34 @@ class SimulatorUi:
             screen_y1 + 18,
             text=f"{battery_level}%",
             fill="#cbd5e1",
-            font=("Helvetica", 8, "bold"),
+            font=("Helvetica", 11, "bold"),
             anchor="e",
         )
         c.create_oval(
-            screen_x2 - 24,
-            screen_y1 + 13,
-            screen_x2 - 14,
-            screen_y1 + 23,
+            screen_x2 - 25,
+            screen_y1 + 12,
+            screen_x2 - 13,
+            screen_y1 + 24,
             fill=self._battery_dot_color(float(battery_level)),
             outline="",
         )
+        if mic_active:
+            c.create_oval(
+                screen_x1 + 36,
+                screen_y1 + 12,
+                screen_x1 + 46,
+                screen_y1 + 22,
+                fill="#ef4444",
+                outline="",
+            )
+            c.create_text(
+                screen_x1 + 50,
+                screen_y1 + 17,
+                text="REC",
+                anchor="w",
+                fill="#fca5a5",
+                font=("Helvetica", 8, "bold"),
+            )
 
         # headline + mood icon
         c.create_text(
@@ -836,6 +1039,7 @@ class SimulatorUi:
         c = self.hat_canvas
         w = self.hat_canvas_width
         h = self.hat_canvas_height
+        mic_active = self._mic_streamer.active and self.state.ui_state == UiState.LISTENING
 
         c.delete("all")
 
@@ -942,17 +1146,34 @@ class SimulatorUi:
             screen_y1 + 20,
             text=f"{battery_level}%",
             fill="#e2e8f0",
-            font=("Helvetica", 9, "bold"),
+            font=("Helvetica", 11, "bold"),
             anchor="e",
         )
         c.create_oval(
-            screen_x2 - 22,
-            screen_y1 + 16,
-            screen_x2 - 12,
+            screen_x2 - 23,
+            screen_y1 + 14,
+            screen_x2 - 11,
             screen_y1 + 26,
             fill=self._battery_dot_color(float(battery_level)),
             outline="",
         )
+        if mic_active:
+            c.create_oval(
+                screen_x1 + 42,
+                screen_y1 + 15,
+                screen_x1 + 52,
+                screen_y1 + 25,
+                fill="#ef4444",
+                outline="",
+            )
+            c.create_text(
+                screen_x1 + 56,
+                screen_y1 + 20,
+                text="REC",
+                anchor="w",
+                fill="#fca5a5",
+                font=("Helvetica", 8, "bold"),
+            )
 
         # avatar icon
         c.create_text(
@@ -1034,22 +1255,97 @@ class SimulatorUi:
             self.preview_mode_var.set("cased")
         self._draw_hat_preview()
 
-    def on_input_mode_change(self, _event: tk.Event[Any]) -> None:
-        mode = self.input_mode_var.get().strip().lower()
-        if mode not in {"text", "mic"}:
-            self.input_mode_var.set("text")
-            mode = "text"
-
-        if mode == "mic" and not SOUNDDEVICE_AVAILABLE:
-            self.input_mode_var.set("text")
-            self.note_var.set("Modo mic no disponible: instala sounddevice y portaudio")
+    def on_open_mic(self) -> None:
+        if not SOUNDDEVICE_AVAILABLE:
+            self.mic_error_var.set("sounddevice no instalado")
+            self.note_var.set("Mic no disponible: instala sounddevice y portaudio")
             return
 
-        self.note_var.set(f"Entrada configurada en modo: {mode}")
+        if self.state.ui_state in (UiState.IDLE, UiState.ERROR):
+            self.on_tap()
+
+        if self.state.ui_state != UiState.LISTENING:
+            self.note_var.set("Abre un turno (LISTENING) antes de activar mic")
+            return
+
+        self._start_mic_capture()
+        if self._mic_streamer.active:
+            self.mic_error_var.set("-")
+            self.note_var.set("Microfono abierto: enviando audio por chunks")
+
+    def on_close_mic(self) -> None:
+        if not self._mic_streamer.active:
+            self.note_var.set("Microfono ya esta cerrado")
+            return
+
+        self._flush_mic_chunks()
+        self._stop_mic_capture()
+        dropped = self._mic_streamer.dropped_chunks
+        dropped_suffix = f", dropped={dropped}" if dropped > 0 else ""
+        self.note_var.set(
+            f"Microfono cerrado ({self._turn_audio_chunks_sent} chunks, "
+            f"{self._turn_audio_bytes_sent / 1024:.1f} KB{dropped_suffix})"
+        )
+
+    def refresh_mic_devices(self) -> None:
+        if not SOUNDDEVICE_AVAILABLE:
+            self.mic_error_var.set("sounddevice no instalado")
+            self.mic_device_combo.configure(values=[])
+            self.mic_device_var.set("")
+            return
+
+        try:
+            devices = sd.query_devices()
+        except Exception as exc:
+            self.mic_error_var.set(f"query_devices error: {exc}")
+            self.mic_device_combo.configure(values=[])
+            self.mic_device_var.set("")
+            return
+
+        entries: list[tuple[int, str]] = []
+        labels: list[str] = []
+        for index, dev in enumerate(devices):
+            if int(dev.get("max_input_channels", 0)) <= 0:
+                continue
+            name = str(dev.get("name", f"device-{index}")).strip()
+            label = f"{index}: {name}"
+            entries.append((index, label))
+            labels.append(label)
+
+        self._mic_input_devices = entries
+        self.mic_device_combo.configure(values=labels)
+
+        if not entries:
+            self.mic_device_var.set("")
+            self.mic_error_var.set("No hay entradas de micro disponibles")
+            return
+
+        current_idx = self._mic_streamer.device_index
+        selected_label = next((label for idx, label in entries if idx == current_idx), entries[0][1])
+        self.mic_device_var.set(selected_label)
+        self.on_mic_device_change(None)
+        self.mic_error_var.set("-")
+
+    def on_mic_device_change(self, _event: tk.Event[Any] | None) -> None:
+        label = self.mic_device_var.get().strip()
+        if not label:
+            self._mic_streamer.device_index = None
+            return
+
+        for index, entry_label in self._mic_input_devices:
+            if entry_label == label:
+                self._mic_streamer.device_index = index
+                self._append_wire(
+                    "SYS",
+                    {"type": "audio.device.selected", "device_index": index, "label": label},
+                )
+                return
 
     def _start_mic_capture(self) -> None:
         if self._mic_streamer.active:
             return
+        if SOUNDDEVICE_AVAILABLE and not self._mic_input_devices:
+            self.refresh_mic_devices()
         try:
             self._mic_streamer.start()
             self._append_log("AUDIO mic capture started")
@@ -1060,10 +1356,12 @@ class SimulatorUi:
                     "sample_rate": MIC_SAMPLE_RATE,
                     "channels": MIC_CHANNELS,
                     "chunk_ms": MIC_CHUNK_MS,
+                    "device_index": self._mic_streamer.device_index,
                 },
             )
+            self.mic_error_var.set("-")
         except Exception as exc:
-            self.input_mode_var.set("text")
+            self.mic_error_var.set(str(exc))
             self.note_var.set(f"No se pudo iniciar microfono: {exc}")
             self._append_log(f"AUDIO error: {exc}")
 
@@ -1077,6 +1375,7 @@ class SimulatorUi:
             {
                 "type": "audio.capture.stopped",
                 "bytes_sent": self._mic_streamer.bytes_sent,
+                "dropped_chunks": self._mic_streamer.dropped_chunks,
             },
         )
 
@@ -1086,7 +1385,9 @@ class SimulatorUi:
         if not self.state.turn_id:
             return
 
-        for chunk in self._mic_streamer.pop_chunks():
+        for chunk in self._mic_streamer.pop_chunks(max_chunks=MAX_CHUNKS_PER_FLUSH):
+            self._turn_audio_chunks_sent += 1
+            self._turn_audio_bytes_sent += int(chunk["size_bytes"])
             self._send_quiet(
                 build_message(
                     "audio.chunk",
@@ -1102,6 +1403,20 @@ class SimulatorUi:
                 )
             )
 
+    def _stop_audio_playback(self, clear_buffer: bool = True) -> None:
+        self._audio_player.stop(clear_buffer=clear_buffer)
+        self._audio_end_pending = False
+
+    def _maybe_finish_audio_playback(self) -> None:
+        if not self._audio_end_pending:
+            return
+        if not self._audio_player.active:
+            self._audio_end_pending = False
+            return
+        if self._audio_player.buffered_bytes <= 0:
+            self._audio_player.stop(clear_buffer=True)
+            self._audio_end_pending = False
+
     def _render(self) -> None:
         self.connection_var.set("connected" if self.state.connected else "disconnected")
         self.session_var.set(self.state.session_id or "-")
@@ -1111,19 +1426,36 @@ class SimulatorUi:
         self.latency_var.set(
             f"{self.state.last_latency_ms} ms" if self.state.last_latency_ms is not None else "-"
         )
+        mic_active = self._mic_streamer.active and self.state.ui_state == UiState.LISTENING
+        self.mic_status_var.set("REC" if mic_active else "OFF")
+        if mic_active:
+            blink_on = int(time.monotonic() * 4) % 2 == 0
+            self.mic_canvas.itemconfigure(self.mic_dot, fill="#ef4444" if blink_on else "#7f1d1d")
+        else:
+            self.mic_canvas.itemconfigure(self.mic_dot, fill="#4b5563")
+        self.audio_chunks_var.set(str(self._turn_audio_chunks_sent))
+        self.audio_kb_var.set(f"{self._turn_audio_bytes_sent / 1024:.1f} KB")
+        self.audio_rx_chunks_var.set(str(self._turn_audio_chunks_rx))
+        self.audio_rx_kb_var.set(f"{self._turn_audio_bytes_rx / 1024:.1f} KB")
+        self.audio_playback_var.set("ON" if self._audio_player.active else "OFF")
         self.battery_label_var.set(f"{int(round(self.state.battery_level))}%")
         self._draw_hat_preview()
 
     def on_tap(self) -> None:
         if self.state.ui_state in (UiState.IDLE, UiState.ERROR):
+            if not self.state.connected:
+                self.note_var.set("Sin conexion al backend")
+                return
             self.state.turn_id = new_turn_id()
             self.state.transcript = ""
             self.state.assistant_text = ""
             self.state.last_latency_ms = None
+            self._turn_audio_chunks_sent = 0
+            self._turn_audio_bytes_sent = 0
+            self._turn_audio_chunks_rx = 0
+            self._turn_audio_bytes_rx = 0
+            self._stop_audio_playback(clear_buffer=True)
             self.state.ui_state = UiState.LISTENING
-            self._last_recording_mode = self.input_mode_var.get().strip().lower() or "text"
-            if self._last_recording_mode == "mic":
-                self._start_mic_capture()
             self._send(
                 build_message(
                     "recording.start",
@@ -1134,16 +1466,25 @@ class SimulatorUi:
                 ),
                 note="Grabacion iniciada",
             )
+            if SOUNDDEVICE_AVAILABLE:
+                self._start_mic_capture()
+            else:
+                self.note_var.set("Grabacion iniciada (mic no disponible)")
             self._render()
             return
 
         if self.state.ui_state == UiState.LISTENING:
             self._flush_mic_chunks()
             self._stop_mic_capture()
+            dropped = self._mic_streamer.dropped_chunks
+            dropped_suffix = f", dropped={dropped}" if dropped > 0 else ""
             self.state.ui_state = UiState.PROCESSING
             self._send(
                 build_message("recording.stop", turn_id=self.state.turn_id),
-                note="Turno enviado",
+                note=(
+                    f"Turno enviado ({self._turn_audio_chunks_sent} chunks, "
+                    f"{self._turn_audio_bytes_sent / 1024:.1f} KB{dropped_suffix})"
+                ),
             )
             self._render()
             return
@@ -1291,6 +1632,7 @@ class SimulatorUi:
             self._append_log("RX _connection connected")
         elif status == "disconnected":
             self._stop_mic_capture()
+            self._stop_audio_playback(clear_buffer=True)
             self.state.connected = False
             detail = str(message.get("detail", "")).strip()
             suffix = f" ({detail})" if detail else ""
@@ -1298,6 +1640,7 @@ class SimulatorUi:
             self._append_log("RX _connection disconnected")
         elif status == "stopped":
             self._stop_mic_capture()
+            self._stop_audio_playback(clear_buffer=True)
             self.state.connected = False
             self.note_var.set("Conexion detenida")
             self._append_log("RX _connection stopped")
@@ -1358,6 +1701,42 @@ class SimulatorUi:
             if isinstance(latency, int):
                 self.state.last_latency_ms = latency
 
+        elif message_type == "assistant.audio.start":
+            if SOUNDDEVICE_AVAILABLE:
+                sample_rate = int(message.get("sample_rate", MIC_SAMPLE_RATE) or MIC_SAMPLE_RATE)
+                channels = int(message.get("channels", MIC_CHANNELS) or MIC_CHANNELS)
+                try:
+                    self._audio_player.start(sample_rate=sample_rate, channels=channels)
+                    self._audio_end_pending = False
+                    self.note_var.set("Reproduciendo audio recibido")
+                except Exception as exc:
+                    self._stop_audio_playback(clear_buffer=True)
+                    self.note_var.set(f"No se pudo abrir salida de audio: {exc}")
+                    self._append_log(f"AUDIO output error: {exc}")
+            else:
+                self.note_var.set("Audio de salida no disponible (sounddevice)")
+
+        elif message_type == "assistant.audio.chunk":
+            payload = message.get("payload")
+            if isinstance(payload, str) and payload:
+                if SOUNDDEVICE_AVAILABLE and not self._audio_player.active:
+                    try:
+                        self._audio_player.start(sample_rate=MIC_SAMPLE_RATE, channels=MIC_CHANNELS)
+                        self._audio_end_pending = False
+                    except Exception:
+                        pass
+                try:
+                    pcm_bytes = base64.b64decode(payload, validate=True)
+                except Exception:
+                    pcm_bytes = b""
+                if pcm_bytes:
+                    self._audio_player.push(pcm_bytes)
+                    self._turn_audio_chunks_rx += 1
+                    self._turn_audio_bytes_rx += len(pcm_bytes)
+
+        elif message_type == "assistant.audio.end":
+            self._audio_end_pending = True
+
         elif message_type == "error":
             self.state.ui_state = UiState.ERROR
             detail = str(message.get("detail", "")).strip()
@@ -1377,6 +1756,7 @@ class SimulatorUi:
                 self._handle_backend_message(message)
 
         self._flush_mic_chunks()
+        self._maybe_finish_audio_playback()
         self._drain_battery()
         self._render()
         self.root.after(120, self._poll_inbox)
@@ -1385,6 +1765,7 @@ class SimulatorUi:
         self._cancel_simulation_timers()
         self._simulation_running = False
         self._stop_mic_capture()
+        self._stop_audio_playback(clear_buffer=True)
         self.worker.stop()
         self.root.after(150, self.root.destroy)
 

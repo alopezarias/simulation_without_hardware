@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import time
@@ -45,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=["baseline", "interrupt", "cancel", "all"],
+        choices=["baseline", "interrupt", "cancel", "audio-loopback", "all"],
         default="all",
         help="Scenario to run",
     )
@@ -225,10 +226,97 @@ async def run_cancel(
         )
 
 
+async def run_audio_loopback(
+    ws: websockets.ClientConnection,
+    prefix: str,
+) -> ScenarioResult:
+    started = time.monotonic()
+    turn_id = f"{prefix}-audio"
+
+    try:
+        await send_json(
+            ws,
+            build_message(
+                "recording.start",
+                turn_id=turn_id,
+                codec="pcm16",
+                sample_rate=16000,
+                channels=1,
+            ),
+        )
+
+        # 120 ms of mono PCM16 silence (matches simulator chunk cadence).
+        pcm_chunk = b"\x00\x00" * int(16000 * 0.12)
+        payload = base64.b64encode(pcm_chunk).decode("ascii")
+        for seq in range(8):
+            await send_json(
+                ws,
+                build_message(
+                    "audio.chunk",
+                    turn_id=turn_id,
+                    seq=seq,
+                    timestamp_ms=seq * 120,
+                    duration_ms=120,
+                    payload=payload,
+                    codec="pcm16",
+                    sample_rate=16000,
+                    channels=1,
+                    size_bytes=len(pcm_chunk),
+                ),
+            )
+            await asyncio.sleep(0.02)
+
+        await send_json(ws, build_message("recording.stop", turn_id=turn_id))
+
+        saw_audio_start = False
+        saw_audio_end = False
+        rx_chunks = 0
+        final_text = ""
+        end = time.monotonic() + 35
+        while time.monotonic() < end:
+            remain = max(0.1, end - time.monotonic())
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remain))
+            msg_type = str(msg.get("type", ""))
+            if msg_type == "assistant.audio.start":
+                saw_audio_start = True
+            elif msg_type == "assistant.audio.chunk":
+                rx_chunks += 1
+            elif msg_type == "assistant.audio.end":
+                saw_audio_end = True
+            elif msg_type == "assistant.text.final":
+                final_text = str(msg.get("text", "")).strip()
+                if saw_audio_start and saw_audio_end:
+                    break
+
+        if not saw_audio_start:
+            raise RuntimeError("Missing assistant.audio.start")
+        if not saw_audio_end:
+            raise RuntimeError("Missing assistant.audio.end")
+        if rx_chunks <= 0:
+            raise RuntimeError("No assistant.audio.chunk received")
+        if not final_text:
+            raise RuntimeError("assistant.text.final returned empty text")
+
+        return ScenarioResult(
+            name="audio-loopback",
+            passed=True,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=f"chunks_rx={rx_chunks} final_text_len={len(final_text)}",
+        )
+
+    except Exception as exc:
+        return ScenarioResult(
+            name="audio-loopback",
+            passed=False,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=str(exc),
+        )
+
+
 async def run_scenarios(args: argparse.Namespace) -> list[ScenarioResult]:
     scenarios: list[str]
     if args.scenario == "all":
-        scenarios = ["baseline", "interrupt", "cancel"]
+        scenarios = ["baseline", "interrupt", "cancel", "audio-loopback"]
     else:
         scenarios = [args.scenario]
 
@@ -243,8 +331,10 @@ async def run_scenarios(args: argparse.Namespace) -> list[ScenarioResult]:
                 result = await run_baseline(ws, prefix)
             elif scenario_name == "interrupt":
                 result = await run_interrupt(ws, prefix)
-            else:
+            elif scenario_name == "cancel":
                 result = await run_cancel(ws, prefix)
+            else:
+                result = await run_audio_loopback(ws, prefix)
 
             results.append(result)
 
