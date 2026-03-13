@@ -99,6 +99,7 @@ Controles UI:
 - Botones: `Tap`, `Double Tap`, `Long Press`, `Enviar Texto`.
 - Teclado: `Space` (tap), doble `Space` rapido (double tap), `Esc` (long press).
 - Flujo rapido de audio: `Tap` abre escucha + micro automaticamente; siguiente `Tap` cierra y envia turno.
+- En turnos de micro (audio real sin texto manual), el backend responde con eco del transcript (STT->texto->TTS) para validar el loop completo de hardware simulado.
 - Botones de audio: `Abrir Mic` y `Cerrar Mic` para control manual sin cambiar estado del turno.
 - Boton `Refrescar Mic` + selector `Dispositivo Mic` para elegir el microfono real.
 - La mini pantalla muestra barra superior de estado (LED, red, bateria) y bloques de texto de envio/respuesta.

@@ -266,9 +266,25 @@ async def process_turn(ctx: AppContext, session: DeviceSession) -> None:
     loopback_used = False
     tts_used = False
     started_at = session.turn_started_monotonic
+    has_audio_input = session.audio_bytes_received > 0
+    # For microphone-driven turns, always answer with the recognized transcript.
+    # This preserves the expected hardware flow: audio -> STT -> same text -> TTS.
+    force_transcript_echo = has_audio_input and not typed_text
 
     try:
-        if ctx.settings.audio_reply_mode == "echo":
+        if force_transcript_echo:
+            final_text = transcribed_text or user_text
+            if final_text:
+                await send(
+                    session,
+                    build_message(
+                        "assistant.text.partial",
+                        turn_id=turn_id,
+                        text=final_text,
+                        accumulated=final_text,
+                    ),
+                )
+        elif ctx.settings.audio_reply_mode == "echo":
             final_text = user_text
             if final_text:
                 await send(
