@@ -10,6 +10,16 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Instalacion separada por proyecto (opcional):
+
+```bash
+# backend solo
+pip install -r backend/requirements.txt
+
+# simulador solo
+pip install -r simulator/requirements.txt
+```
+
 Si vas a usar micro en macOS, instala PortAudio:
 
 ```bash
@@ -31,7 +41,7 @@ Nota: la primera transcripcion con Whisper descarga el modelo configurado (`WHIS
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 Modo `echo` (audio->texto->audio sin pasar por agente):
@@ -39,13 +49,13 @@ Modo `echo` (audio->texto->audio sin pasar por agente):
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 Si en macOS falla `pyttsx3`, fuerza el backend de voz nativo:
 
 ```bash
-ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 ## 2. Verificar backend vivo
@@ -59,7 +69,7 @@ curl -s http://127.0.0.1:8000/health
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-python simulator.py --ws-url ws://127.0.0.1:8000/ws
+python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws
 ```
 
 Comandos dentro del CLI:
@@ -81,7 +91,7 @@ quit
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-python simulator_ui.py --ws-url ws://127.0.0.1:8000/ws
+python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws
 ```
 
 Controles UI:
@@ -105,7 +115,7 @@ Controles UI:
 ### Escenario A: handshake de sesion
 
 1. Arranca backend.
-2. Arranca `simulator_ui.py`.
+2. Arranca la UI con `python -m simulator.entrypoints.ui`.
 3. Comprueba en la UI: conexion `connected`, `session_id` visible y estado `idle`.
 
 ### Escenario B: cambio de agente
@@ -140,10 +150,10 @@ Controles UI:
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-ENABLE_WHISPER_STT=true WHISPER_MODEL_SIZE=tiny ENABLE_LOCAL_TTS=true TTS_BACKEND=auto AUDIO_REPLY_MODE=echo python -m uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+ENABLE_WHISPER_STT=true WHISPER_MODEL_SIZE=tiny ENABLE_LOCAL_TTS=true TTS_BACKEND=auto AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
-2. Abre `simulator_ui.py`, habla y cierra con `Tap`.
+2. Abre la UI (`python -m simulator.entrypoints.ui`), habla y cierra con `Tap`.
 3. Comprueba:
    - `transcript.final` con el texto reconocido,
    - `assistant.text.final` con ese mismo texto (modo `echo`),
@@ -184,7 +194,7 @@ Con backend activo:
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-python smoke_test.py --ws-url ws://127.0.0.1:8000/ws
+python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws
 ```
 
 Resultado esperado:
@@ -200,25 +210,25 @@ Con backend activo:
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-python scenario_runner.py --ws-url ws://127.0.0.1:8000/ws --scenario all
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario all
 ```
 
 Escenario individual:
 
 ```bash
-python scenario_runner.py --ws-url ws://127.0.0.1:8000/ws --scenario interrupt
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario interrupt
 ```
 
 Escenario de audio loopback:
 
 ```bash
-python scenario_runner.py --ws-url ws://127.0.0.1:8000/ws --scenario audio-loopback
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario audio-loopback
 ```
 
 Guardar reporte JSON:
 
 ```bash
-python scenario_runner.py --ws-url ws://127.0.0.1:8000/ws --scenario all --report /tmp/sim_report.json
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario all --report /tmp/sim_report.json
 ```
 
 ## 8. Activar auth basica de dispositivo (opcional)
@@ -233,9 +243,9 @@ SIM_ALLOWED_DEVICE_IDS=sim-device-001,sim-device-ui-001,sim-smoke-001
 Arrancar backend y cliente con token:
 
 ```bash
-python simulator_ui.py --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
-python simulator.py --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
-python smoke_test.py --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
+python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
+python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
+python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
 ```
 
 ## 9. OpenClawd por WebSocket con tunel SSH

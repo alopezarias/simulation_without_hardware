@@ -55,16 +55,16 @@ OPENCLAWD_WS_SESSION_FIELD=session
 ```bash
 cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
-uvicorn app.backend:app --host 127.0.0.1 --port 8000 --reload --env-file .env
+python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
 En otra terminal:
 
 ```bash
-python scenario_runner.py --ws-url ws://127.0.0.1:8000/ws --scenario baseline
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario baseline
 ```
 
-Si pasa, ya puedes usar `simulator_ui.py` y ejecutar escenarios de interfaz.
+Si pasa, ya puedes usar `python -m simulator.entrypoints.ui` y ejecutar escenarios de interfaz.
 
 ## 5. Diagnostico rapido
 

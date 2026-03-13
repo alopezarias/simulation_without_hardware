@@ -19,19 +19,19 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 ### D1. Backend asincrono con FastAPI/WebSocket
 - Se adopta `FastAPI` + endpoint `/ws` para canal bidireccional estado-comandos-eventos.
 - Razon: simplicidad, latencia baja, y buena trazabilidad de eventos en tiempo real.
-- Implementacion: `app/backend.py`.
+- Implementacion: `backend/api.py`.
 
 ### D2. Protocolo explicito y compartido
-- Tipos de mensaje y estados comunes centralizados en `protocol.py`.
+- Tipos de mensaje y estados comunes centralizados en `backend/shared/protocol.py`.
 - Estados canonicos: `idle`, `listening`, `processing`, `speaking`, `error`.
 - Razon: evitar divergencia entre backend, simulador CLI y simulador UI.
 
 ### D3. Adaptador OpenClawd desacoplado por modo
-- `openclawd_adapter.py` soporta `mock`, `http` y `ws`.
+- `backend/infrastructure/ai/openclawd_adapter.py` soporta `mock`, `http` y `ws`.
 - Razon: poder iterar localmente en `mock`, y luego conectar VPS por HTTP/WS sin reescribir backend.
 
 ### D4. Simulacion UI orientada a hardware final
-- `simulator_ui.py` replica interacciones del dispositivo:
+- `simulator/entrypoints/ui.py` replica interacciones del dispositivo:
   - `Tap`, `Double Tap`, `Long Press`
   - mini pantalla estilo HAT (estado, bateria, texto, LED)
   - terminal lateral de trafico WS (`TX/RX/SYS`)
@@ -56,7 +56,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - Razon: evitar picos de RAM y degradacion en sesiones largas.
 
 ### D7. Pipeline de voz local (STT + TTS)
-- Nuevo modulo `speech_pipeline.py`:
+- Nuevo modulo `backend/infrastructure/speech/speech_pipeline.py`:
   - STT: `faster-whisper` (configurable por env)
   - TTS: backend `auto|say|pyttsx3`
   - conversion segura a PCM16 para streaming
@@ -74,15 +74,21 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - Razon: diagnostico rapido en pruebas locales y en VPS/tunel.
 
 ### D10. Validacion automatizada por escenarios
-- `smoke_test.py` + `scenario_runner.py`.
+- `simulator/qa/smoke_test.py` + `simulator/qa/scenario_runner.py`.
 - Escenarios: `baseline`, `interrupt`, `cancel`, `audio-loopback`.
 - Razon: detectar regresiones de protocolo/estado/audio en cada iteracion.
 
 ### D11. Refactor a arquitectura hexagonal (sin romper contrato)
-- Se desacopla `app/backend.py` en capas `config`, `domain`, `application`, `infrastructure` dentro de `app/`.
-- `app/backend.py` queda como fachada de compatibilidad + composition root (`uvicorn app.backend:app` se mantiene).
+- Se desacopla `backend/api.py` en capas `config`, `domain`, `application`, `infrastructure` dentro de `backend/`.
+- `backend/api.py` queda como fachada de compatibilidad + composition root (`python -m backend.run` recomendado, manteniendo `backend.api:app`).
 - Puertos explicitos para IA, speech, salida a dispositivo y storage de audio temporal.
 - Razon: permitir enchufar/desenchufar motores de IA/adapters sin reescribir casos de uso.
+
+### D12. Separacion fisica backend/simulator como proyectos independientes
+- Todo el backend queda en `backend/` y todo el emulador en `simulator/`.
+- Se elimina el arbol `app/` y scripts Python sueltos en raiz para evitar acoplamiento accidental.
+- Dependencias separadas en `backend/requirements.txt` y `simulator/requirements.txt`.
+- Razon: desplegar backend en servidor sin arrastrar dependencias/UI del simulador.
 
 ## 4. Cronologia resumida
 
@@ -109,26 +115,26 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - Se introduce modo `echo` para prueba definitiva audio->texto->audio.
 
 ### Hito 6 (hexagonal definitivo)
-- Refactor de backend monolitico a modulos hexagonales en `app/`.
+- Refactor de backend monolitico a modulos hexagonales en `backend/`.
 - Se mantiene compatibilidad de contrato WS, estado y comandos.
-- Se conserva `app/backend.py` como entrada estable para despliegue y tests.
+- Se conserva `backend/api.py` como entrada estable para despliegue y tests.
 
 ## 5. Snapshot tecnico actual
 
 ### Componentes
-- `app/backend.py`: fachada de compatibilidad y punto de entrada de despliegue.
-- `app/config/settings.py`: carga de configuracion runtime.
-- `app/domain/session.py`: entidad de sesion.
-- `app/application/ports.py`: puertos hexagonales.
-- `app/application/services/*`: casos de uso de sesion/recording/turno/ruteo.
-- `app/infrastructure/*`: adapters concretos (OpenClawd, Speech, WS, audio-store, logging).
-- `protocol.py`: tipos de mensaje y helpers.
-- `openclawd_adapter.py`: cliente de agente remoto (mock/http/ws).
-- `speech_pipeline.py`: STT/TTS local y conversion a PCM16.
-- `simulator_ui.py`: emulador visual y de interaccion.
-- `simulator.py`: emulador CLI.
-- `scenario_runner.py`: regresion por escenarios.
-- `smoke_test.py`: prueba E2E minima.
+- `backend/api.py`: fachada de compatibilidad y punto de entrada de despliegue.
+- `backend/config/settings.py`: carga de configuracion runtime.
+- `backend/domain/session.py`: entidad de sesion.
+- `backend/application/ports.py`: puertos hexagonales.
+- `backend/application/services/*`: casos de uso de sesion/recording/turno/ruteo.
+- `backend/infrastructure/*`: adapters concretos (OpenClawd, Speech, WS, audio-store, logging).
+- `backend/shared/protocol.py`: tipos de mensaje y helpers.
+- `backend/infrastructure/ai/openclawd_adapter.py`: cliente de agente remoto (mock/http/ws).
+- `backend/infrastructure/speech/speech_pipeline.py`: STT/TTS local y conversion a PCM16.
+- `simulator/entrypoints/ui.py`: emulador visual y de interaccion.
+- `simulator/entrypoints/cli.py`: emulador CLI.
+- `simulator/qa/scenario_runner.py`: regresion por escenarios.
+- `simulator/qa/smoke_test.py`: prueba E2E minima.
 
 ### Flujo de turno (audio)
 1. `recording.start`
@@ -183,7 +189,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 
 ## 9. Reglas para futuras modificaciones (importante para IA)
 
-1. No romper el contrato de `protocol.py` sin versionarlo y actualizar simuladores/tests.
+1. No romper el contrato de `backend/shared/protocol.py` sin versionarlo y actualizar simuladores/tests.
 2. Mantener `audio.chunk` como unidad de streaming (evitar blobs monoliticos).
 3. Cualquier cambio de estados debe mantener coherencia UI/backend (`ui.state`).
 4. Si se toca audio, correr al menos `scenario_runner --scenario audio-loopback`.
@@ -194,7 +200,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 
 - Regresion de escenarios (`baseline`, `interrupt`, `cancel`, `audio-loopback`) pasando en modo base.
 - Modo `echo` validado con STT+TTS activos y audio de respuesta en chunks.
-- Suite unitaria backend actualizada y pasando (`42 passed`).
+- Suite unitaria actualizada y pasando (`76 passed`, backend + simulator).
 - Documentacion operativa centralizada en `RUNBOOK.md`.
 
 ## 11. Contexto estructurado (para IA)
@@ -207,7 +213,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
   "core_stack": {
     "backend": "FastAPI + WebSocket",
     "simulators": ["CLI", "Tkinter UI"],
-    "protocol_file": "protocol.py"
+    "protocol_file": "backend/shared/protocol.py + simulator/shared/protocol.py"
   },
   "message_flow": {
     "inbound_from_device": [
@@ -254,7 +260,7 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
     "SIM_ALLOWED_DEVICE_IDS"
   ],
   "regression": {
-    "runner": "scenario_runner.py",
+    "runner": "simulator/qa/scenario_runner.py",
     "required_scenarios": ["baseline", "interrupt", "cancel", "audio-loopback"]
   }
 }
@@ -266,9 +272,9 @@ Construir un MVP "hardwareless" en Python, con backend WebSocket + simuladores (
 - `RUNBOOK.md`
 - `OPENCLAWD_WS_SETUP.md`
 - `MVP_ALIGNMENT.md`
-- `app/backend.py`
-- `speech_pipeline.py`
-- `simulator_ui.py`
-- `openclawd_adapter.py`
-- `protocol.py`
-- `scenario_runner.py`
+- `backend/api.py`
+- `backend/infrastructure/speech/speech_pipeline.py`
+- `simulator/entrypoints/ui.py`
+- `backend/infrastructure/ai/openclawd_adapter.py`
+- `backend/shared/protocol.py`
+- `simulator/qa/scenario_runner.py`

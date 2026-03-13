@@ -4,23 +4,32 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 
 ## Componentes
 
-- `app/backend.py`: fachada de compatibilidad del backend y entrypoint para `uvicorn app.backend:app`.
-- `app/`: arquitectura hexagonal (config, dominio, aplicacion, infraestructura).
-- `openclawd_adapter.py`: cliente OpenClawd usado por el adapter de infraestructura.
-- `speech_pipeline.py`: pipeline local de voz usado por el adapter de infraestructura.
-- `protocol.py`: utilidades de protocolo y estados compartidos.
-- `simulator.py`: simulador CLI.
-- `simulator_ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
-- `smoke_test.py`: prueba end-to-end automatizada.
-- `scenario_runner.py`: ejecutor de escenarios de simulacion repetibles (baseline/interrupcion/cancelacion).
+- `backend/`: proyecto backend independiente (FastAPI + WebSocket), desplegable sin dependencias del simulador.
+- `backend/api.py`: fachada de compatibilidad del backend y entrypoint para `python -m uvicorn backend.api:app`.
+- `backend/bootstrap.py`: composition root y wiring de adapters/servicios.
+- `backend/run.py`: launcher recomendado (`python -m backend.run`) para evitar usar otro intérprete por error.
+- `backend/infrastructure/ai/openclawd_adapter.py`: cliente OpenClawd usado por el adapter de infraestructura.
+- `backend/infrastructure/speech/speech_pipeline.py`: pipeline local de voz usado por el adapter de infraestructura.
+- `backend/shared/protocol.py`: utilidades de protocolo y estados compartidos.
+- `simulator/`: proyecto simulador independiente (CLI/UI/QA) para emular hardware.
+- `simulator/entrypoints/cli.py`: simulador CLI.
+- `simulator/entrypoints/ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
+- `simulator/qa/smoke_test.py`: prueba end-to-end automatizada.
+- `simulator/qa/scenario_runner.py`: ejecutor de escenarios de simulacion repetibles (baseline/interrupcion/cancelacion).
 
 ## Estructura hexagonal
 
-- `app/config/settings.py`: configuracion runtime desde entorno.
-- `app/domain/session.py`: estado de sesion del dispositivo.
-- `app/application/ports.py`: puertos de IA, voz, salida y audio-store.
-- `app/application/services/*`: casos de uso (`message_bus`, `recording`, `turn_processing`, `message_router`, `session_init`).
-- `app/infrastructure/*`: adapters concretos (WebSocket, OpenClawd, Speech, audio temporal, logging).
+Backend (`backend/`):
+- `backend/config/settings.py`: configuracion runtime desde entorno.
+- `backend/domain/session.py`: estado de sesion del dispositivo.
+- `backend/application/ports.py`: puertos de IA, voz, salida y audio-store.
+- `backend/application/services/*`: casos de uso (`message_bus`, `recording`, `turn_processing`, `message_router`, `session_init`).
+- `backend/infrastructure/*`: adapters concretos (WebSocket, OpenClawd, Speech, audio temporal, logging).
+
+Simulator (`simulator/`):
+- `simulator/domain/*`, `simulator/application/*`, `simulator/infrastructure/*`: capas del simulador.
+- `simulator/entrypoints/*`: entradas ejecutables (CLI/UI) que ensamblan esas capas.
+- `simulator/shared/protocol.py`: contrato de mensajes del lado simulador.
 
 ## Flujo MVP cubierto
 
@@ -43,7 +52,30 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 
 Consulta [RUNBOOK.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/RUNBOOK.md) para comandos completos por escenario.
 
-## Tests unitarios (backend)
+## Dependencias por proyecto
+
+Solo backend (despliegue servidor):
+
+```bash
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+```
+
+Solo simulador (entorno local):
+
+```bash
+source .venv/bin/activate
+pip install -r simulator/requirements.txt
+```
+
+Todo junto (desarrollo local):
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+## Tests unitarios (backend + simulador)
 
 Instalacion:
 
@@ -71,4 +103,5 @@ Consulta [MVP_ALIGNMENT.md](/Users/user/Documents/projects/ai/ia_device/simulati
 
 ## ADR
 
-Documento de arquitectura y evolucion: [ADR-0001](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0001-foundations-and-evolution.md).
+- Backend y evolucion general: [ADR-0001](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0001-foundations-and-evolution.md).
+- Estrategia de testing y refactor del simulador: [ADR-0002](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0002-simulator-testing-and-hexagonal-plan.md).
