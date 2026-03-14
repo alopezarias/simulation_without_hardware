@@ -11,6 +11,7 @@ import os
 import queue
 import threading
 import time
+import textwrap
 import tkinter as tk
 from tkinter import ttk
 from typing import Any
@@ -39,6 +40,11 @@ MIC_CHANNELS = 1
 MIC_CHUNK_MS = 120
 MAX_CHUNKS_PER_FLUSH = 6
 MAX_LOG_LINES = 800
+MAX_WIRE_LINES = 1800
+STATUS_PANEL_MIN_WIDTH = 250
+SCREEN_PANEL_MIN_WIDTH = 384
+TERMINAL_PANEL_MIN_WIDTH = 360
+BUTTON_PANEL_MIN_WIDTH = 240
 
 DEVICE_BUTTONS = {
     DeviceInputEvent.PRESS: "Press",
@@ -61,6 +67,15 @@ REMOTE_STATE_LABELS = {
     UiState.PROCESSING: "processing",
     UiState.SPEAKING: "speaking",
     UiState.ERROR: "error",
+}
+
+DEVICE_STATE_COLORS = {
+    DeviceState.LOCKED: "#475569",
+    DeviceState.READY: "#38bdf8",
+    DeviceState.LISTEN: "#ef4444",
+    DeviceState.MENU: "#f59e0b",
+    DeviceState.MODE: "#a855f7",
+    DeviceState.AGENTS: "#22c55e",
 }
 
 
@@ -199,6 +214,7 @@ class MicAudioStreamer:
     def start(self) -> None:
         if not SOUNDDEVICE_AVAILABLE:
             raise RuntimeError("sounddevice is not available. Install dependencies from requirements.txt.")
+        assert sd is not None
         if self.active:
             return
 
@@ -294,6 +310,7 @@ class AudioOutputPlayer:
     def start(self, sample_rate: int, channels: int) -> None:
         if not SOUNDDEVICE_AVAILABLE:
             return
+        assert sd is not None
         self.stop(clear_buffer=True)
         self.sample_rate = sample_rate
         self.channels = channels
@@ -381,7 +398,8 @@ class SimulatorUi:
     def __init__(self, root: tk.Tk, ws_url: str, device_id: str, auth_token: str) -> None:
         self.root = root
         self.root.title("Simulador de Dispositivo Conversacional")
-        self.root.geometry("1180x760")
+        self.root.geometry("1460x820")
+        self.root.minsize(1280, 720)
 
         initial_state = UiStateModel(device_id=device_id)
         self.inbox: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -411,13 +429,18 @@ class SimulatorUi:
         self.latency_var = tk.StringVar(value="-")
         self.note_var = tk.StringVar(value="Ready")
         self.mic_status_var = tk.StringVar(value="OFF")
+        self.mic_error_var = tk.StringVar(value="-")
         self.audio_rx_var = tk.StringVar(value="0 chunks")
         self.audio_tx_var = tk.StringVar(value="0 chunks")
+        self.audio_playback_var = tk.StringVar(value="OFF")
+        self.preview_mode_var = tk.StringVar(value=os.getenv("SIM_PREVIEW_MODE", "cased").strip().lower() or "cased")
+        self.mic_device_var = tk.StringVar(value="")
         self.text_entry_var = tk.StringVar(value="")
 
         self._audio_player = AudioOutputPlayer()
         self._audio_end_pending = False
         self._mic_streamer = MicAudioStreamer()
+        self._mic_input_devices: list[tuple[int, str]] = []
         self._turn_audio_chunks_sent = 0
         self._turn_audio_bytes_sent = 0
         self._turn_audio_chunks_rx = 0
@@ -425,6 +448,7 @@ class SimulatorUi:
 
         self._build_layout()
         self._bind_keys()
+        self.refresh_mic_devices()
 
         self.worker.start()
         self._poll_inbox()
@@ -436,12 +460,19 @@ class SimulatorUi:
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=12)
         root_frame.pack(fill=tk.BOTH, expand=True)
+        root_frame.columnconfigure(0, weight=1)
+        root_frame.rowconfigure(2, weight=1)
 
         top = ttk.Frame(root_frame)
-        top.pack(fill=tk.X)
+        top.grid(row=0, column=0, sticky="nsew")
+        top.rowconfigure(0, weight=1)
+        top.columnconfigure(0, weight=0, minsize=STATUS_PANEL_MIN_WIDTH)
+        top.columnconfigure(1, weight=0, minsize=SCREEN_PANEL_MIN_WIDTH)
+        top.columnconfigure(2, weight=1, minsize=TERMINAL_PANEL_MIN_WIDTH)
+        top.columnconfigure(3, weight=0, minsize=BUTTON_PANEL_MIN_WIDTH)
 
         summary = ttk.LabelFrame(top, text="Estado", padding=12)
-        summary.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        summary.grid(row=0, column=0, sticky="nsw")
 
         rows = [
             ("Conexion", self.connection_var),
@@ -456,15 +487,55 @@ class SimulatorUi:
             ("Turn ID", self.turn_var),
             ("Latencia", self.latency_var),
             ("Mic", self.mic_status_var),
+            ("Mic error", self.mic_error_var),
             ("TX audio", self.audio_tx_var),
             ("RX audio", self.audio_rx_var),
+            ("Audio OUT", self.audio_playback_var),
         ]
         for index, (label, variable) in enumerate(rows):
             ttk.Label(summary, text=f"{label}:").grid(row=index, column=0, sticky="w", padx=(0, 8), pady=2)
             ttk.Label(summary, textvariable=variable).grid(row=index, column=1, sticky="w", pady=2)
 
+        hat_preview = ttk.LabelFrame(top, text="Pantalla / hardware", padding=12)
+        hat_preview.grid(row=0, column=1, sticky="nsw", padx=(12, 0))
+
+        self.hat_canvas = tk.Canvas(
+            hat_preview,
+            width=360,
+            height=520,
+            highlightthickness=0,
+            bg="#0f172a",
+        )
+        self.hat_canvas.pack(fill=tk.BOTH, expand=True)
+
+        wire_frame = ttk.LabelFrame(top, text="Terminal trafico WS", padding=12)
+        wire_frame.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
+
+        wire_inner = ttk.Frame(wire_frame)
+        wire_inner.pack(fill=tk.BOTH, expand=True)
+
+        self.wire_text = tk.Text(
+            wire_inner,
+            height=20,
+            wrap=tk.NONE,
+            bg="#0b1220",
+            fg="#d1fae5",
+            insertbackground="#d1fae5",
+            font=("Courier", 10),
+        )
+        self.wire_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.wire_text.configure(state=tk.DISABLED)
+        self.wire_text.tag_configure("TX", foreground="#86efac")
+        self.wire_text.tag_configure("RX", foreground="#93c5fd")
+        self.wire_text.tag_configure("SYS", foreground="#fcd34d")
+        self.wire_text.tag_configure("TX-BLOCKED", foreground="#fca5a5")
+
+        wire_scroll = ttk.Scrollbar(wire_inner, orient=tk.VERTICAL, command=self.wire_text.yview)
+        wire_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.wire_text.configure(yscrollcommand=wire_scroll.set)
+
         primary = ttk.LabelFrame(top, text="Controles del dispositivo", padding=12)
-        primary.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 0))
+        primary.grid(row=0, column=3, sticky="nse", padx=(12, 0))
 
         ttk.Label(
             primary,
@@ -473,15 +544,18 @@ class SimulatorUi:
             justify=tk.LEFT,
         ).pack(anchor="w", pady=(0, 10))
 
+        self.primary_buttons: dict[DeviceInputEvent, ttk.Button] = {}
         for event in (DeviceInputEvent.PRESS, DeviceInputEvent.DOUBLE_PRESS, DeviceInputEvent.LONG_PRESS):
-            ttk.Button(
+            button = ttk.Button(
                 primary,
                 text=DEVICE_BUTTONS[event],
                 command=lambda current=event: self._dispatch(current),
-            ).pack(fill=tk.X, pady=4)
+            )
+            button.pack(fill=tk.X, pady=4)
+            self.primary_buttons[event] = button
 
         debug_panel = ttk.LabelFrame(root_frame, text="Diagnostico secundario", padding=12)
-        debug_panel.pack(fill=tk.X, pady=(12, 0))
+        debug_panel.grid(row=1, column=0, sticky="ew", pady=(12, 0))
 
         ttk.Label(
             debug_panel,
@@ -497,15 +571,38 @@ class SimulatorUi:
         ttk.Button(debug_panel, text="Enviar Texto", command=self.on_send_text).grid(row=1, column=2, padx=4)
         ttk.Button(debug_panel, text="Abrir Mic", command=self.on_open_mic).grid(row=1, column=3, padx=4)
         ttk.Button(debug_panel, text="Cerrar Mic", command=self.on_close_mic).grid(row=1, column=4, padx=4)
+        ttk.Button(debug_panel, text="Refrescar Mic", command=self.refresh_mic_devices).grid(row=1, column=5, padx=4)
+
+        ttk.Label(debug_panel, text="Dispositivo Mic").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.mic_device_combo = ttk.Combobox(
+            debug_panel,
+            state="readonly",
+            textvariable=self.mic_device_var,
+            values=[],
+            width=44,
+        )
+        self.mic_device_combo.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 8), pady=(10, 0))
+        self.mic_device_combo.bind("<<ComboboxSelected>>", self.on_mic_device_change)
+
+        ttk.Label(debug_panel, text="Vista").grid(row=2, column=4, sticky="e", pady=(10, 0))
+        preview_combo = ttk.Combobox(
+            debug_panel,
+            state="readonly",
+            textvariable=self.preview_mode_var,
+            values=("cased", "bare"),
+            width=10,
+        )
+        preview_combo.grid(row=2, column=5, sticky="w", pady=(10, 0))
+        preview_combo.bind("<<ComboboxSelected>>", self.on_preview_mode_change)
 
         logs = ttk.LabelFrame(root_frame, text="Log", padding=12)
-        logs.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
+        logs.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
 
         self.log_text = tk.Text(logs, height=22, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
 
-        ttk.Label(root_frame, textvariable=self.note_var).pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(root_frame, textvariable=self.note_var).grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
         self._render()
 
@@ -513,6 +610,136 @@ class SimulatorUi:
         self.root.bind("<space>", lambda _event: self._dispatch(DeviceInputEvent.PRESS) or "break")
         self.root.bind("<Escape>", lambda _event: self._dispatch(DeviceInputEvent.LONG_PRESS) or "break")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def refresh_mic_devices(self) -> None:
+        if not SOUNDDEVICE_AVAILABLE:
+            self.mic_error_var.set("sounddevice no instalado")
+            self.mic_device_combo.configure(values=[])
+            self.mic_device_var.set("")
+            return
+        assert sd is not None
+
+        try:
+            devices = sd.query_devices()
+        except Exception as exc:
+            self.mic_error_var.set(f"query_devices error: {exc}")
+            self.mic_device_combo.configure(values=[])
+            self.mic_device_var.set("")
+            return
+
+        entries: list[tuple[int, str]] = []
+        labels: list[str] = []
+        for index, dev in enumerate(devices):
+            if int(dev.get("max_input_channels", 0)) <= 0:
+                continue
+            label = f"{index}: {str(dev.get('name', f'device-{index}')).strip()}"
+            entries.append((index, label))
+            labels.append(label)
+
+        self._mic_input_devices = entries
+        self.mic_device_combo.configure(values=labels)
+        if not entries:
+            self.mic_device_var.set("")
+            self.mic_error_var.set("No hay entradas de micro disponibles")
+            return
+
+        current = self._mic_streamer.device_index
+        selected = next((label for index, label in entries if index == current), entries[0][1])
+        self.mic_device_var.set(selected)
+        self.on_mic_device_change(None)
+        self.mic_error_var.set("-")
+
+    def on_mic_device_change(self, _event: tk.Event[Any] | None) -> None:
+        label = self.mic_device_var.get().strip()
+        if not label:
+            self._mic_streamer.device_index = None
+            return
+        for index, entry_label in self._mic_input_devices:
+            if entry_label == label:
+                self._mic_streamer.device_index = index
+                self._append_wire(
+                    "SYS",
+                    {"type": "audio.device.selected", "device_index": index, "label": label},
+                )
+                return
+
+    def on_preview_mode_change(self, _event: tk.Event[Any] | None) -> None:
+        mode = self.preview_mode_var.get().strip().lower()
+        if mode not in {"cased", "bare"}:
+            self.preview_mode_var.set("cased")
+        self._draw_hardware_preview()
+
+    def _wire_safe_payload(self, payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        safe = dict(payload)
+        if safe.get("type") in {"audio.chunk", "assistant.audio.chunk"} and isinstance(safe.get("payload"), str):
+            safe["payload"] = f"<base64:{len(safe['payload'])} chars>"
+        text = safe.get("text")
+        if isinstance(text, str) and len(text) > 220:
+            safe["text"] = text[:220] + "...<trimmed>"
+        return safe
+
+    def _append_wire(self, direction: str, payload: Any) -> None:
+        if not hasattr(self, "wire_text"):
+            return
+        timestamp = time.strftime("%H:%M:%S")
+        payload = self._wire_safe_payload(payload)
+        if isinstance(payload, (dict, list)):
+            text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        else:
+            text = str(payload)
+        line = f"[{timestamp}] {direction} {text}\n"
+        self.wire_text.configure(state=tk.NORMAL)
+        tag = direction if direction in {"TX", "RX", "SYS", "TX-BLOCKED"} else ""
+        self.wire_text.insert(tk.END, line, tag)
+        line_count = int(float(self.wire_text.index("end-1c").split(".")[0]))
+        if line_count > MAX_WIRE_LINES:
+            overflow = line_count - MAX_WIRE_LINES
+            self.wire_text.delete("1.0", f"{overflow + 1}.0")
+        self.wire_text.see(tk.END)
+        self.wire_text.configure(state=tk.DISABLED)
+
+    def _wrap_preview_text(self, text: str, width: int, lines: int) -> str:
+        compact = " ".join(text.split()).strip()
+        if not compact:
+            return "-"
+        wrapped = textwrap.wrap(compact, width=width, break_long_words=True, break_on_hyphens=False)
+        if len(wrapped) > lines:
+            wrapped = wrapped[:lines]
+            wrapped[-1] = wrapped[-1][: max(0, width - 3)] + "..."
+        return "\n".join(wrapped)
+
+    def _draw_hardware_preview(self) -> None:
+        if not hasattr(self, "hat_canvas"):
+            return
+        canvas = self.hat_canvas
+        canvas.delete("all")
+        mode = self.preview_mode_var.get().strip().lower()
+        shell_fill = "#f8fafc" if mode == "cased" else "#111827"
+        shell_outline = "#cbd5e1" if mode == "cased" else "#334155"
+        screen_fill = "#020617"
+        canvas.create_rectangle(0, 0, 360, 520, fill="#0f172a", outline="")
+        canvas.create_rectangle(58, 24, 302, 496, fill=shell_fill, outline=shell_outline, width=2)
+        if mode == "cased":
+            canvas.create_rectangle(122, 2, 238, 34, fill="#d97706", outline="#b45309", width=2)
+        led_color = DEVICE_STATE_COLORS.get(self.state.device_state, "#ef4444")
+        canvas.create_oval(168, 42, 192, 66, fill=led_color, outline="#1d4ed8")
+        canvas.create_rectangle(78, 88, 282, 392, fill=screen_fill, outline="#1e293b", width=2)
+        canvas.create_text(92, 104, anchor="nw", text=self.state.device_state.value, fill="#e2e8f0", font=("Helvetica", 15, "bold"))
+        canvas.create_text(268, 104, anchor="ne", text=self.state.remote_ui_state.value, fill="#93c5fd", font=("Helvetica", 10, "bold"))
+        canvas.create_text(92, 132, anchor="nw", text=f"agent: {self.state.active_agent}", fill="#94a3b8", font=("Helvetica", 9))
+        canvas.create_text(92, 148, anchor="nw", text=f"focus: {self._focus_label()}", fill="#94a3b8", font=("Helvetica", 9))
+        mic_live = self._mic_streamer.active and self.state.device_state == DeviceState.LISTEN
+        canvas.create_text(92, 174, anchor="nw", text="mic", fill="#f8fafc", font=("Helvetica", 10, "bold"))
+        canvas.create_oval(128, 175, 140, 187, fill="#ef4444" if mic_live else "#475569", outline="")
+        canvas.create_text(146, 174, anchor="nw", text="REC" if mic_live else "OFF", fill="#fca5a5" if mic_live else "#94a3b8", font=("Helvetica", 9, "bold"))
+        canvas.create_text(92, 212, anchor="nw", text="YOU", fill="#e2e8f0", font=("Helvetica", 9, "bold"))
+        canvas.create_text(92, 230, anchor="nw", text=self._wrap_preview_text(self.state.transcript or "Tap/Press to speak", 22, 5), fill="#e2e8f0", font=("Helvetica", 10), width=166)
+        canvas.create_text(92, 306, anchor="nw", text="AGENT", fill="#86efac", font=("Helvetica", 9, "bold"))
+        canvas.create_text(92, 324, anchor="nw", text=self._wrap_preview_text(self.state.assistant_text or "Waiting for backend response", 22, 5), fill="#86efac", font=("Helvetica", 10), width=166)
+        canvas.create_text(180, 430, anchor="center", text=f"TX {self._turn_audio_chunks_sent} / RX {self._turn_audio_chunks_rx}", fill="#cbd5e1", font=("Helvetica", 10, "bold"))
+        canvas.create_text(180, 452, anchor="center", text=self.note_var.get(), fill="#f8fafc", font=("Helvetica", 9), width=220)
 
     def _append_log(self, message: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {message}\n"
@@ -529,9 +756,11 @@ class SimulatorUi:
         if not self.state.connected:
             self.note_var.set("Sin conexion al backend")
             self._append_log(f"TX blocked {message.get('type', '-')}")
+            self._append_wire("TX-BLOCKED", message)
             return
         self.worker.send(message)
         self._append_log(f"TX {message.get('type', '-')}")
+        self._append_wire("TX", message)
 
     def _dispatch(self, event: DeviceInputEvent) -> None:
         previous_state = self.state.device_state
@@ -546,6 +775,14 @@ class SimulatorUi:
         if previous_state == DeviceState.LISTEN and self.state.device_state != DeviceState.LISTEN:
             self._flush_mic_chunks()
             self._stop_mic_capture()
+        if previous_state != DeviceState.LISTEN and self.state.device_state == DeviceState.LISTEN:
+            self._turn_audio_chunks_sent = 0
+            self._turn_audio_bytes_sent = 0
+            self._turn_audio_chunks_rx = 0
+            self._turn_audio_bytes_rx = 0
+            self._stop_audio_playback(clear_buffer=True)
+            if SOUNDDEVICE_AVAILABLE:
+                self._start_mic_capture(auto=True)
         if self.state.device_state != DeviceState.LISTEN and self._mic_streamer.active:
             self._flush_mic_chunks()
             self._stop_mic_capture()
@@ -568,10 +805,13 @@ class SimulatorUi:
         return f"warm / version={self.state.agents_version or '-'}"
 
     def _render(self) -> None:
+        remote_label = REMOTE_STATE_LABELS.get(self.state.remote_ui_state)
+        if remote_label is None:
+            remote_label = self.state.remote_ui_state.value
         self.connection_var.set("connected" if self.state.connected else "disconnected")
         self.session_var.set(self.state.session_id or "-")
         self.device_state_var.set(DEVICE_STATE_LABELS[self.state.device_state])
-        self.remote_state_var.set(REMOTE_STATE_LABELS.get(self.state.remote_ui_state, self.state.remote_ui_state.value))
+        self.remote_state_var.set(remote_label)
         self.focus_var.set(self._focus_label())
         self.agent_var.set(self.state.active_agent)
         self.mode_var.set(self.state.navigation.active_mode)
@@ -584,6 +824,8 @@ class SimulatorUi:
         self.mic_status_var.set("REC" if self._mic_streamer.active else "OFF")
         self.audio_tx_var.set(f"{self._turn_audio_chunks_sent} chunks / {self._turn_audio_bytes_sent // 1024} KB")
         self.audio_rx_var.set(f"{self._turn_audio_chunks_rx} chunks / {self._turn_audio_bytes_rx // 1024} KB")
+        self.audio_playback_var.set("ON" if self._audio_player.active else "OFF")
+        self._draw_hardware_preview()
 
     def on_send_text(self) -> None:
         text = self.text_entry_var.get().strip()
@@ -607,6 +849,7 @@ class SimulatorUi:
     def on_open_mic(self) -> None:
         if not SOUNDDEVICE_AVAILABLE:
             self.note_var.set("Mic no disponible: instala sounddevice y portaudio")
+            self.mic_error_var.set("sounddevice no instalado")
             return
         if self.state.device_state != DeviceState.LISTEN:
             self.note_var.set("Entra en LISTEN con Press antes de abrir el micro")
@@ -614,12 +857,9 @@ class SimulatorUi:
         if self._mic_streamer.active:
             self.note_var.set("Microfono ya abierto")
             return
-        try:
-            self._mic_streamer.start()
+        self._start_mic_capture(auto=False)
+        if self._mic_streamer.active:
             self.note_var.set("Microfono abierto")
-            self._append_log("AUDIO mic capture started")
-        except Exception as exc:
-            self.note_var.set(f"No se pudo iniciar microfono: {exc}")
         self._render()
 
     def on_close_mic(self) -> None:
@@ -635,7 +875,44 @@ class SimulatorUi:
         if not self._mic_streamer.active:
             return
         self._mic_streamer.stop()
+        self.mic_error_var.set("-")
         self._append_log("AUDIO mic capture stopped")
+        self._append_wire(
+            "SYS",
+            {
+                "type": "audio.capture.stopped",
+                "bytes_sent": self._mic_streamer.bytes_sent,
+                "dropped_chunks": self._mic_streamer.dropped_chunks,
+            },
+        )
+
+    def _start_mic_capture(self, *, auto: bool) -> None:
+        if self._mic_streamer.active:
+            return
+        if SOUNDDEVICE_AVAILABLE and not self._mic_input_devices:
+            self.refresh_mic_devices()
+        try:
+            self._mic_streamer.start()
+            self.mic_error_var.set("-")
+            self._append_log("AUDIO mic capture started")
+            self._append_wire(
+                "SYS",
+                {
+                    "type": "audio.capture.started",
+                    "sample_rate": MIC_SAMPLE_RATE,
+                    "channels": MIC_CHANNELS,
+                    "chunk_ms": MIC_CHUNK_MS,
+                    "device_index": self._mic_streamer.device_index,
+                    "auto": auto,
+                },
+            )
+            if auto:
+                self.note_var.set("LISTEN activo: microfono abierto")
+        except Exception as exc:
+            self.mic_error_var.set(str(exc))
+            self.note_var.set(f"No se pudo iniciar microfono: {exc}")
+            self._append_log(f"AUDIO error: {exc}")
+            self._append_wire("SYS", {"type": "audio.capture.error", "detail": str(exc), "auto": auto})
 
     def _flush_mic_chunks(self) -> None:
         if not self._mic_streamer.active or self.state.device_state != DeviceState.LISTEN:
@@ -693,6 +970,7 @@ class SimulatorUi:
                 self.note_var.set("Conexion detenida")
         self.controller.replace_snapshot(snapshot)
         self._append_log(f"SYS {status}")
+        self._append_wire("SYS", message)
         self._render()
 
     def _handle_audio_message(self, message: dict[str, Any]) -> None:
@@ -744,6 +1022,7 @@ class SimulatorUi:
         if update.note:
             self.note_var.set(update.note)
         self._append_log(f"RX {message_type}")
+        self._append_wire("RX", message)
         if previous_state != self.state.device_state:
             self._append_log(f"STATE {previous_state.value} -> {self.state.device_state.value}")
         self._render()

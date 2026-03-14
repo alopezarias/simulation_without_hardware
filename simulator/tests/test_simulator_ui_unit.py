@@ -140,6 +140,86 @@ class MicStub:
         return result
 
 
+class FakeLayoutWidget:
+    def __init__(self, parent: Any = None, **kwargs: Any) -> None:
+        self.parent = parent
+        self.kwargs = kwargs
+        self.children: list[Any] = []
+        self.pack_calls: list[dict[str, Any]] = []
+        self.grid_calls: list[dict[str, Any]] = []
+        self.column_configs: list[tuple[Any, dict[str, Any]]] = []
+        self.row_configs: list[tuple[Any, dict[str, Any]]] = []
+        self.bind_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.configure_calls: list[dict[str, Any]] = []
+        self.text = kwargs.get("text")
+        if parent is not None and hasattr(parent, "children"):
+            parent.children.append(self)
+
+    def pack(self, **kwargs: Any) -> None:
+        self.pack_calls.append(kwargs)
+
+    def grid(self, **kwargs: Any) -> None:
+        self.grid_calls.append(kwargs)
+
+    def configure(self, **kwargs: Any) -> None:
+        self.configure_calls.append(kwargs)
+
+    def bind(self, *args: Any, **kwargs: Any) -> None:
+        self.bind_calls.append((args, kwargs))
+
+    def columnconfigure(self, index: Any, **kwargs: Any) -> None:
+        self.column_configs.append((index, kwargs))
+
+    def rowconfigure(self, index: Any, **kwargs: Any) -> None:
+        self.row_configs.append((index, kwargs))
+
+    def yview(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def set(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def tag_configure(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class FakeCanvas(FakeLayoutWidget):
+    def create_rectangle(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def create_oval(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def create_text(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def delete(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class FakeRoot(FakeLayoutWidget):
+    def title(self, _value: str) -> None:
+        return None
+
+    def geometry(self, _value: str) -> None:
+        return None
+
+    def minsize(self, _width: int, _height: int) -> None:
+        return None
+
+    def after(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def destroy(self) -> None:
+        return None
+
+    def protocol(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def bind(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
 @pytest.fixture
 def ui_stub() -> simulator_ui.SimulatorUi:
     ui = simulator_ui.SimulatorUi.__new__(simulator_ui.SimulatorUi)
@@ -162,19 +242,29 @@ def ui_stub() -> simulator_ui.SimulatorUi:
     ui.latency_var = DummyVar()
     ui.note_var = DummyVar("-")
     ui.mic_status_var = DummyVar("OFF")
+    ui.mic_error_var = DummyVar("-")
     ui.audio_rx_var = DummyVar("0 chunks")
     ui.audio_tx_var = DummyVar("0 chunks")
+    ui.audio_playback_var = DummyVar("OFF")
+    ui.preview_mode_var = DummyVar("cased")
+    ui.mic_device_var = DummyVar("")
     ui.text_entry_var = DummyVar("")
     ui.log_text = Mock()
+    ui.wire_text = Mock()
+    ui.hat_canvas = Mock()
+    ui.mic_device_combo = Mock(configure=Mock())
     ui.root = Mock(after=Mock(), destroy=Mock())
     ui._audio_player = FakeAudioPlayer()
     ui._audio_end_pending = False
     ui._mic_streamer = MicStub(active=False)
+    ui._mic_input_devices = []
     ui._turn_audio_chunks_sent = 0
     ui._turn_audio_bytes_sent = 0
     ui._turn_audio_chunks_rx = 0
     ui._turn_audio_bytes_rx = 0
     ui._append_log = Mock()
+    ui._append_wire = Mock()
+    ui._draw_hardware_preview = Mock()
     ui._render = simulator_ui.SimulatorUi._render.__get__(ui, simulator_ui.SimulatorUi)
     return ui
 
@@ -253,6 +343,62 @@ def test_audio_output_player_push_trims_overflow() -> None:
     assert player.buffered_bytes == 8
 
 
+def test_build_layout_restores_four_accessible_primary_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(simulator_ui.ttk, "Frame", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "LabelFrame", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "Label", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "Button", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "Entry", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "Combobox", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.ttk, "Scrollbar", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.tk, "Text", FakeLayoutWidget)
+    monkeypatch.setattr(simulator_ui.tk, "Canvas", FakeCanvas)
+
+    ui = simulator_ui.SimulatorUi.__new__(simulator_ui.SimulatorUi)
+    ui.root = FakeRoot()
+    ui.connection_var = DummyVar()
+    ui.session_var = DummyVar()
+    ui.device_state_var = DummyVar()
+    ui.remote_state_var = DummyVar()
+    ui.focus_var = DummyVar()
+    ui.agent_var = DummyVar()
+    ui.mode_var = DummyVar()
+    ui.pending_agent_var = DummyVar()
+    ui.cache_var = DummyVar()
+    ui.turn_var = DummyVar()
+    ui.latency_var = DummyVar()
+    ui.note_var = DummyVar("Ready")
+    ui.mic_status_var = DummyVar("OFF")
+    ui.mic_error_var = DummyVar("-")
+    ui.audio_rx_var = DummyVar("0 chunks")
+    ui.audio_tx_var = DummyVar("0 chunks")
+    ui.audio_playback_var = DummyVar("OFF")
+    ui.preview_mode_var = DummyVar("cased")
+    ui.mic_device_var = DummyVar("")
+    ui.text_entry_var = DummyVar("")
+    ui._render = Mock()
+    ui._dispatch = Mock()
+
+    ui._build_layout()
+
+    primary_titles = [
+        child.text
+        for child in ui.root.children[0].children[0].children
+        if child.text in {"Estado", "Pantalla / hardware", "Terminal trafico WS", "Controles del dispositivo"}
+    ]
+    assert primary_titles == [
+        "Estado",
+        "Pantalla / hardware",
+        "Terminal trafico WS",
+        "Controles del dispositivo",
+    ]
+    assert set(ui.primary_buttons) == {
+        DeviceInputEvent.PRESS,
+        DeviceInputEvent.DOUBLE_PRESS,
+        DeviceInputEvent.LONG_PRESS,
+    }
+
+
 def test_render_tracks_local_and_remote_state_boundary(
     ui_stub: simulator_ui.SimulatorUi,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,6 +440,21 @@ def test_dispatch_uses_controller_and_waits_for_agent_ack(ui_stub: simulator_ui.
     ui_stub._handle_backend_message({"type": "agent.selected", "agent_id": "assistant-tech"})
     assert ui_stub.state.pending_agent_ack is None
     assert ui_stub.state.active_agent == "assistant-tech"
+
+
+def test_dispatch_auto_opens_mic_when_entering_listen(
+    ui_stub: simulator_ui.SimulatorUi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(simulator_ui, "SOUNDDEVICE_AVAILABLE", True)
+    ui_stub.state.connected = True
+    ui_stub.state.device_state = DeviceState.READY
+
+    ui_stub._dispatch(DeviceInputEvent.PRESS)
+
+    assert ui_stub.state.device_state == DeviceState.LISTEN
+    assert ui_stub._mic_streamer.started is True
+    assert ui_stub._append_log.called
 
 
 def test_handle_backend_message_keeps_local_device_state_when_ui_state_arrives(ui_stub: simulator_ui.SimulatorUi) -> None:
@@ -375,6 +536,7 @@ def test_handle_audio_messages_update_counters(ui_stub: simulator_ui.SimulatorUi
     assert ui_stub._turn_audio_chunks_rx == 1
     assert ui_stub._turn_audio_bytes_rx == 4
     assert ui_stub._audio_end_pending is True
+    assert ui_stub.audio_playback_var.get() == "OFF" or ui_stub.audio_playback_var.get() == "ON"
 
 
 def test_maybe_finish_audio_playback_stops_when_buffer_empty(ui_stub: simulator_ui.SimulatorUi) -> None:

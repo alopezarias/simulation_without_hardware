@@ -509,7 +509,7 @@ async def test_process_turn_assistant_mode_uses_adapter_stream_and_loopback(
 
 
 @pytest.mark.asyncio
-async def test_process_turn_audio_only_forces_transcript_echo_even_in_assistant_mode(
+async def test_process_turn_audio_only_uses_assistant_response_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     websocket = FakeWebSocket()
@@ -530,11 +530,8 @@ async def test_process_turn_audio_only_forces_transcript_echo_even_in_assistant_
         "transcribe_recording",
         AsyncMock(return_value="esto viene del microfono"),
     )
-    monkeypatch.setattr(
-        backend.turn_processing_service,
-        "synthesize_text_to_audio",
-        AsyncMock(return_value=True),
-    )
+    synthesize_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(backend.turn_processing_service, "synthesize_text_to_audio", synthesize_mock)
     stream_loopback_mock = AsyncMock(return_value=False)
     monkeypatch.setattr(backend.turn_processing_service, "stream_loopback_audio", stream_loopback_mock)
 
@@ -543,7 +540,59 @@ async def test_process_turn_audio_only_forces_transcript_echo_even_in_assistant_
     transcript = next(msg for msg in websocket.sent if msg["type"] == "transcript.final")
     final = next(msg for msg in websocket.sent if msg["type"] == "assistant.text.final")
     assert transcript["text"] == "esto viene del microfono"
-    assert final["text"] == "esto viene del microfono"
+    assert final["text"] == "respuesta generica"
+    synthesize_mock.assert_awaited_once_with(
+        backend._container.context,
+        session,
+        "turn-1",
+        "respuesta generica",
+    )
+    stream_loopback_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_turn_mock_mode_uses_transcript_as_assistant_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+    session.turn_id = "turn-1"
+    session.audio_bytes_received = 2048
+    session.audio_chunks_received = 3
+
+    class MockModeAdapter:
+        mode = "mock"
+
+        async def stream_response(self, **_kwargs: Any):
+            raise AssertionError("mock mode must not call assistant generation")
+            yield ""
+
+    monkeypatch.setattr(backend, "AUDIO_REPLY_MODE", "assistant")
+    monkeypatch.setattr(backend, "adapter", MockModeAdapter())
+    monkeypatch.setattr(
+        backend.turn_processing_service,
+        "transcribe_recording",
+        AsyncMock(return_value="texto reconocido por stt"),
+    )
+    synthesize_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(backend.turn_processing_service, "synthesize_text_to_audio", synthesize_mock)
+    stream_loopback_mock = AsyncMock(return_value=False)
+    monkeypatch.setattr(backend.turn_processing_service, "stream_loopback_audio", stream_loopback_mock)
+
+    await backend.process_turn(session)
+
+    transcript = next(msg for msg in websocket.sent if msg["type"] == "transcript.final")
+    partial = next(msg for msg in websocket.sent if msg["type"] == "assistant.text.partial")
+    final = next(msg for msg in websocket.sent if msg["type"] == "assistant.text.final")
+    assert transcript["text"] == "texto reconocido por stt"
+    assert partial["text"] == "texto reconocido por stt"
+    assert final["text"] == "texto reconocido por stt"
+    synthesize_mock.assert_awaited_once_with(
+        backend._container.context,
+        session,
+        "turn-1",
+        "texto reconocido por stt",
+    )
     stream_loopback_mock.assert_not_awaited()
 
 

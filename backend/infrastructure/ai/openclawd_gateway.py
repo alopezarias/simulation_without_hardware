@@ -11,6 +11,10 @@ class OpenClawdGateway:
     def __init__(self, adapter: OpenClawdAdapter | None = None) -> None:
         self._adapter = adapter or OpenClawdAdapter()
 
+    @property
+    def mode(self) -> str:
+        return self._adapter.mode
+
     async def stream_response(
         self,
         agent_id: str,
