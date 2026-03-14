@@ -22,6 +22,8 @@ DEVICE_MESSAGE_TYPES = {
     "device.hello",
     "session.start",
     "agent.select",
+    "agents.version.request",
+    "agents.list.request",
     "recording.start",
     "audio.chunk",
     "recording.stop",

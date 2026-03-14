@@ -1,19 +1,22 @@
-"""Run repeatable simulation scenarios against the websocket backend."""
+"""Run repeatable controller-driven scenarios against the websocket backend."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import os
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 import websockets
 from dotenv import load_dotenv
 
+from simulator.application.ports import BackendGateway, Clock
+from simulator.application.services import SimulatorController
+from simulator.domain.events import DeviceInputEvent, DeviceState
+from simulator.domain.state import SimulatorState
 from simulator.shared.protocol import build_message
 
 load_dotenv()
@@ -25,6 +28,109 @@ class ScenarioResult:
     passed: bool
     duration_ms: int
     details: str
+
+
+class ScenarioClock(Clock):
+    def now(self) -> float:
+        return time.monotonic()
+
+
+class ScenarioGateway(BackendGateway):
+    def __init__(self, ws: websockets.ClientConnection, sent_messages: list[dict[str, Any]]) -> None:
+        self._ws = ws
+        self._sent_messages = sent_messages
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        self._sent_messages.append(message)
+        await self._ws.send(json.dumps(message))
+
+    async def start_listen(self, turn_id: str) -> None:
+        await self._send(
+            build_message(
+                "recording.start",
+                turn_id=turn_id,
+                codec="pcm16",
+                sample_rate=16000,
+                channels=1,
+            )
+        )
+
+    async def stop_listen(self, turn_id: str) -> None:
+        await self._send(build_message("recording.stop", turn_id=turn_id))
+
+    async def cancel_listen(self, turn_id: str | None) -> None:
+        payload: dict[str, Any] = {}
+        if turn_id:
+            payload["turn_id"] = turn_id
+        await self._send(build_message("recording.cancel", **payload))
+
+    async def request_agents_version(self) -> None:
+        await self._send(build_message("agents.version.request"))
+
+    async def request_agents_list(self) -> None:
+        await self._send(build_message("agents.list.request"))
+
+    async def confirm_agent(self, agent_id: str) -> None:
+        await self._send(build_message("agent.select", agent_id=agent_id))
+
+
+class ScenarioHarness:
+    def __init__(
+        self,
+        ws: websockets.ClientConnection,
+        device_id: str,
+        sent_messages: list[dict[str, Any]],
+    ) -> None:
+        self.ws = ws
+        self.controller = SimulatorController(
+            SimulatorState(device_id=device_id),
+            gateway=ScenarioGateway(ws, sent_messages),
+            clock=ScenarioClock(),
+        )
+        self.sent_messages = sent_messages
+        self.received_messages: list[dict[str, Any]] = []
+
+    async def open_session(self, auth_token: str) -> None:
+        hello = build_message(
+            "device.hello",
+            device_id=self.controller.snapshot.device_id,
+            firmware_version="0.3.0",
+            simulated=True,
+            capabilities=["screen", "leds", "button", "audio_in", "audio_out"],
+            active_agent=self.controller.snapshot.active_agent,
+        )
+        if auth_token:
+            hello["auth_token"] = auth_token
+        await self.ws.send(json.dumps(hello))
+        await self.recv_until(lambda msg: msg.get("type") == "session.ready", timeout_s=8.0)
+
+    async def recv_until(
+        self,
+        predicate: Callable[[dict[str, Any]], bool],
+        *,
+        timeout_s: float,
+    ) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + timeout_s
+        seen: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            remain = max(0.1, deadline - time.monotonic())
+            raw = await asyncio.wait_for(self.ws.recv(), timeout=remain)
+            message = json.loads(raw)
+            seen.append(message)
+            self.received_messages.append(message)
+            await self.controller.handle_backend_message(message)
+            if predicate(message):
+                return seen
+        raise RuntimeError(f"Timeout waiting for expected backend message; seen={[m.get('type') for m in seen]}")
+
+    async def press(self, event: DeviceInputEvent) -> None:
+        await self.controller.handle_input(event)
+
+    async def send_debug_text(self, text: str) -> None:
+        await self.ws.send(
+            json.dumps(build_message("debug.user_text", turn_id=self.controller.snapshot.turn_id, text=text))
+        )
+        self.sent_messages.append({"type": "debug.user_text", "turn_id": self.controller.snapshot.turn_id, "text": text})
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,310 +152,197 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=["baseline", "interrupt", "cancel", "audio-loopback", "all"],
+        choices=["locked-ready", "listen-agents", "cache-refresh", "agent-ack", "all"],
         default="all",
         help="Scenario to run",
     )
-    parser.add_argument(
-        "--report",
-        default="",
-        help="Optional JSON report output path",
-    )
+    parser.add_argument("--report", default="", help="Optional JSON report output path")
     return parser.parse_args()
 
 
-async def send_json(ws: websockets.ClientConnection, message: dict[str, Any]) -> None:
-    await ws.send(json.dumps(message))
-
-
-async def recv_until(
-    ws: websockets.ClientConnection,
-    target_type: str,
-    timeout_s: float = 8.0,
-) -> list[dict[str, Any]]:
-    end = time.monotonic() + timeout_s
-    seen: list[dict[str, Any]] = []
-
-    while time.monotonic() < end:
-        remain = max(0.1, end - time.monotonic())
-        raw = await asyncio.wait_for(ws.recv(), timeout=remain)
-        msg = json.loads(raw)
-        seen.append(msg)
-        if msg.get("type") == target_type:
-            return seen
-
-    raise RuntimeError(f"Timeout waiting for '{target_type}'. Seen: {[m.get('type') for m in seen]}")
-
-
-async def open_session(
-    ws: websockets.ClientConnection,
-    device_id: str,
-    auth_token: str,
-) -> None:
-    hello = build_message(
-        "device.hello",
-        device_id=device_id,
-        firmware_version="0.3.0",
-        simulated=True,
-        capabilities=["screen", "leds", "button", "audio_in", "audio_out"],
-        active_agent="assistant-general",
-    )
-    if auth_token:
-        hello["auth_token"] = auth_token
-
-    await send_json(ws, hello)
-    await recv_until(ws, "session.ready", timeout_s=8)
-
-
-async def run_baseline(
-    ws: websockets.ClientConnection,
-    prefix: str,
-) -> ScenarioResult:
+async def run_locked_ready(harness: ScenarioHarness) -> ScenarioResult:
     started = time.monotonic()
-    turn_id = f"{prefix}-baseline"
-
     try:
-        await send_json(ws, build_message("recording.start", turn_id=turn_id, codec="pcm16", sample_rate=16000, channels=1))
-        await asyncio.sleep(0.3)
-        await send_json(ws, build_message("debug.user_text", turn_id=turn_id, text="Prueba de turno baseline"))
-        await asyncio.sleep(0.25)
-        await send_json(ws, build_message("recording.stop", turn_id=turn_id))
+        await harness.press(DeviceInputEvent.LONG_PRESS)
+        if harness.controller.snapshot.device_state != DeviceState.READY:
+            raise RuntimeError("Device did not unlock to READY")
 
-        stream = await recv_until(ws, "assistant.text.final", timeout_s=14)
-        final = next(item for item in stream if item.get("type") == "assistant.text.final")
-        text = str(final.get("text", "")).strip()
-        if not text:
-            raise RuntimeError("assistant.text.final returned empty text")
+        await harness.press(DeviceInputEvent.PRESS)
+        if harness.controller.snapshot.device_state != DeviceState.LISTEN:
+            raise RuntimeError("READY -> LISTEN failed")
 
-        latency = final.get("latency_ms")
-        duration_ms = int((time.monotonic() - started) * 1000)
+        await harness.send_debug_text("Prueba del flujo principal")
+        await harness.press(DeviceInputEvent.PRESS)
+        await harness.recv_until(lambda msg: msg.get("type") == "assistant.text.final", timeout_s=20.0)
+
+        if harness.controller.snapshot.device_state != DeviceState.READY:
+            raise RuntimeError("LISTEN did not return to READY after finalize")
+
         return ScenarioResult(
-            name="baseline",
+            name="locked-ready",
             passed=True,
-            duration_ms=duration_ms,
-            details=f"final_text_len={len(text)} latency_ms={latency}",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details="unlock, listen, finalize and response flow succeeded",
         )
-
     except Exception as exc:
         return ScenarioResult(
-            name="baseline",
+            name="locked-ready",
             passed=False,
             duration_ms=int((time.monotonic() - started) * 1000),
             details=str(exc),
         )
 
 
-async def run_interrupt(
-    ws: websockets.ClientConnection,
-    prefix: str,
-) -> ScenarioResult:
+async def run_listen_agents(harness: ScenarioHarness) -> ScenarioResult:
     started = time.monotonic()
-    turn_id = f"{prefix}-interrupt"
-
     try:
-        await send_json(ws, build_message("recording.start", turn_id=turn_id, codec="pcm16", sample_rate=16000, channels=1))
-        await asyncio.sleep(0.25)
-        await send_json(
-            ws,
-            build_message(
-                "debug.user_text",
-                turn_id=turn_id,
-                text="Necesito una respuesta larga para comprobar interrupcion durante speaking",
-            ),
-        )
-        await asyncio.sleep(0.2)
-        await send_json(ws, build_message("recording.stop", turn_id=turn_id))
+        if harness.controller.snapshot.device_state == DeviceState.LOCKED:
+            await harness.press(DeviceInputEvent.LONG_PRESS)
+        harness.sent_messages.clear()
 
-        await recv_until(ws, "assistant.text.partial", timeout_s=8)
-        await send_json(ws, build_message("assistant.interrupt", turn_id=turn_id))
+        await harness.press(DeviceInputEvent.PRESS)
+        await harness.press(DeviceInputEvent.LONG_PRESS)
 
-        stream = await recv_until(ws, "assistant.text.final", timeout_s=10)
-        final = next(item for item in stream if item.get("type") == "assistant.text.final")
-        interrupted = bool(final.get("interrupted"))
-        if not interrupted:
-            raise RuntimeError("Expected interrupted=true in assistant.text.final")
+        if harness.controller.snapshot.device_state != DeviceState.AGENTS:
+            raise RuntimeError("LISTEN -> AGENTS failed")
+
+        sent_types = [message["type"] for message in harness.sent_messages]
+        if sent_types.count("recording.cancel") != 1:
+            raise RuntimeError(f"Expected one recording.cancel before AGENTS, got {sent_types}")
+        if "agents.version.request" in sent_types or "agents.list.request" in sent_types:
+            raise RuntimeError("Warm cache path should not refresh agents on first AGENTS entry")
+
+        harness.sent_messages.clear()
+        await harness.press(DeviceInputEvent.PRESS)
+        if harness.sent_messages:
+            raise RuntimeError("Navigating AGENTS with Press emitted unexpected remote traffic")
+
+        await harness.press(DeviceInputEvent.DOUBLE_PRESS)
+        if harness.controller.snapshot.device_state != DeviceState.READY:
+            raise RuntimeError("AGENTS cancel did not return to READY")
 
         return ScenarioResult(
-            name="interrupt",
+            name="listen-agents",
             passed=True,
             duration_ms=int((time.monotonic() - started) * 1000),
-            details="assistant interrupt confirmed",
+            details="AGENTS entry cancels listen first and navigation stays local",
         )
-
     except Exception as exc:
         return ScenarioResult(
-            name="interrupt",
+            name="listen-agents",
             passed=False,
             duration_ms=int((time.monotonic() - started) * 1000),
             details=str(exc),
         )
 
 
-async def run_cancel(
-    ws: websockets.ClientConnection,
-    prefix: str,
-) -> ScenarioResult:
+async def run_cache_refresh(harness: ScenarioHarness) -> ScenarioResult:
     started = time.monotonic()
-    turn_id = f"{prefix}-cancel"
-
     try:
-        await send_json(ws, build_message("recording.start", turn_id=turn_id, codec="pcm16", sample_rate=16000, channels=1))
-        await asyncio.sleep(0.2)
-        await send_json(ws, build_message("debug.user_text", turn_id=turn_id, text="Turno que se cancela"))
-        await asyncio.sleep(0.2)
-        await send_json(ws, build_message("recording.cancel", turn_id=turn_id))
+        if harness.controller.snapshot.device_state == DeviceState.LOCKED:
+            await harness.press(DeviceInputEvent.LONG_PRESS)
+        harness.controller.snapshot.agent_cache.expires_at = time.monotonic() - 1
+        harness.sent_messages.clear()
 
-        end = time.monotonic() + 6
-        idle_seen = False
-        while time.monotonic() < end:
-            remain = max(0.1, end - time.monotonic())
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remain))
-            if msg.get("type") == "ui.state" and msg.get("state") == "idle":
-                idle_seen = True
-                break
-        if not idle_seen:
-            raise RuntimeError("Did not observe ui.state=idle after cancel")
-
-        return ScenarioResult(
-            name="cancel",
-            passed=True,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            details="recording.cancel returned to idle",
+        await harness.press(DeviceInputEvent.PRESS)
+        await harness.press(DeviceInputEvent.LONG_PRESS)
+        await harness.recv_until(
+            lambda msg: msg.get("type") in {"agents.version.response", "agents.list.response"},
+            timeout_s=8.0,
         )
 
+        sent_types = [message["type"] for message in harness.sent_messages]
+        if "agents.version.request" not in sent_types:
+            raise RuntimeError(f"Expected agents.version.request, got {sent_types}")
+        if harness.controller.snapshot.device_state != DeviceState.AGENTS:
+            raise RuntimeError("Refresh path should stay in AGENTS")
+
+        return ScenarioResult(
+            name="cache-refresh",
+            passed=True,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=f"refresh path emitted {sent_types}",
+        )
     except Exception as exc:
         return ScenarioResult(
-            name="cancel",
+            name="cache-refresh",
             passed=False,
             duration_ms=int((time.monotonic() - started) * 1000),
             details=str(exc),
         )
 
 
-async def run_audio_loopback(
-    ws: websockets.ClientConnection,
-    prefix: str,
-) -> ScenarioResult:
+async def run_agent_ack(harness: ScenarioHarness) -> ScenarioResult:
     started = time.monotonic()
-    turn_id = f"{prefix}-audio"
-
     try:
-        await send_json(
-            ws,
-            build_message(
-                "recording.start",
-                turn_id=turn_id,
-                codec="pcm16",
-                sample_rate=16000,
-                channels=1,
-            ),
-        )
+        if harness.controller.snapshot.device_state == DeviceState.LOCKED:
+            await harness.press(DeviceInputEvent.LONG_PRESS)
+        harness.controller.snapshot.agent_cache.expires_at = time.monotonic() + 60
+        harness.sent_messages.clear()
 
-        # 120 ms of mono PCM16 silence (matches simulator chunk cadence).
-        pcm_chunk = b"\x00\x00" * int(16000 * 0.12)
-        payload = base64.b64encode(pcm_chunk).decode("ascii")
-        for seq in range(8):
-            await send_json(
-                ws,
-                build_message(
-                    "audio.chunk",
-                    turn_id=turn_id,
-                    seq=seq,
-                    timestamp_ms=seq * 120,
-                    duration_ms=120,
-                    payload=payload,
-                    codec="pcm16",
-                    sample_rate=16000,
-                    channels=1,
-                    size_bytes=len(pcm_chunk),
-                ),
-            )
-            await asyncio.sleep(0.02)
+        await harness.press(DeviceInputEvent.PRESS)
+        await harness.press(DeviceInputEvent.LONG_PRESS)
+        original_agent = harness.controller.snapshot.active_agent
+        await harness.press(DeviceInputEvent.PRESS)
+        focused_agent = harness.controller.snapshot.focused_agent
+        if focused_agent == original_agent:
+            raise RuntimeError("Scenario did not move focus to a different agent")
 
-        await send_json(ws, build_message("recording.stop", turn_id=turn_id))
+        await harness.press(DeviceInputEvent.LONG_PRESS)
+        if harness.controller.snapshot.active_agent != original_agent:
+            raise RuntimeError("Agent changed before backend ACK")
+        if harness.controller.snapshot.pending_agent_ack != focused_agent:
+            raise RuntimeError("Pending ACK marker missing after agent confirm")
 
-        saw_audio_start = False
-        saw_audio_end = False
-        rx_chunks = 0
-        final_text = ""
-        end = time.monotonic() + 35
-        while time.monotonic() < end:
-            remain = max(0.1, end - time.monotonic())
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remain))
-            msg_type = str(msg.get("type", ""))
-            if msg_type == "assistant.audio.start":
-                saw_audio_start = True
-            elif msg_type == "assistant.audio.chunk":
-                rx_chunks += 1
-            elif msg_type == "assistant.audio.end":
-                saw_audio_end = True
-            elif msg_type == "assistant.text.final":
-                final_text = str(msg.get("text", "")).strip()
-                if saw_audio_start and saw_audio_end:
-                    break
-
-        if not saw_audio_start:
-            raise RuntimeError("Missing assistant.audio.start")
-        if not saw_audio_end:
-            raise RuntimeError("Missing assistant.audio.end")
-        if rx_chunks <= 0:
-            raise RuntimeError("No assistant.audio.chunk received")
-        if not final_text:
-            raise RuntimeError("assistant.text.final returned empty text")
+        await harness.recv_until(lambda msg: msg.get("type") == "agent.selected", timeout_s=8.0)
+        if harness.controller.snapshot.active_agent != focused_agent:
+            raise RuntimeError("Active agent did not update after ACK")
+        if harness.controller.snapshot.pending_agent_ack is not None:
+            raise RuntimeError("Pending ACK was not cleared")
 
         return ScenarioResult(
-            name="audio-loopback",
+            name="agent-ack",
             passed=True,
             duration_ms=int((time.monotonic() - started) * 1000),
-            details=f"chunks_rx={rx_chunks} final_text_len={len(final_text)}",
+            details=f"agent.select confirmed only after ACK for {focused_agent}",
         )
-
     except Exception as exc:
         return ScenarioResult(
-            name="audio-loopback",
+            name="agent-ack",
             passed=False,
             duration_ms=int((time.monotonic() - started) * 1000),
             details=str(exc),
         )
+
+
+async def run_named_scenario(name: str, args: argparse.Namespace) -> ScenarioResult:
+    sent_messages: list[dict[str, Any]] = []
+    async with websockets.connect(args.ws_url) as ws:
+        harness = ScenarioHarness(ws, device_id=args.device_id, sent_messages=sent_messages)
+        await harness.open_session(auth_token=args.auth_token)
+        if name == "locked-ready":
+            return await run_locked_ready(harness)
+        if name == "listen-agents":
+            return await run_listen_agents(harness)
+        if name == "cache-refresh":
+            return await run_cache_refresh(harness)
+        return await run_agent_ack(harness)
 
 
 async def run_scenarios(args: argparse.Namespace) -> list[ScenarioResult]:
-    scenarios: list[str]
-    if args.scenario == "all":
-        scenarios = ["baseline", "interrupt", "cancel", "audio-loopback"]
-    else:
-        scenarios = [args.scenario]
-
-    results: list[ScenarioResult] = []
-
-    for index, scenario_name in enumerate(scenarios, start=1):
-        async with websockets.connect(args.ws_url) as ws:
-            await open_session(ws, device_id=args.device_id, auth_token=args.auth_token)
-            prefix = f"sim{index}-{int(time.time())}"
-
-            if scenario_name == "baseline":
-                result = await run_baseline(ws, prefix)
-            elif scenario_name == "interrupt":
-                result = await run_interrupt(ws, prefix)
-            elif scenario_name == "cancel":
-                result = await run_cancel(ws, prefix)
-            else:
-                result = await run_audio_loopback(ws, prefix)
-
-            results.append(result)
-
-    return results
+    scenario_names = ["locked-ready", "listen-agents", "cache-refresh", "agent-ack"]
+    if args.scenario != "all":
+        scenario_names = [args.scenario]
+    return [await run_named_scenario(name, args) for name in scenario_names]
 
 
 def print_results(results: list[ScenarioResult]) -> None:
     print("SIMULATION RESULTS")
     for result in results:
         status = "OK" if result.passed else "FAIL"
-        print(f"- {result.name:10s} {status:4s} {result.duration_ms:5d} ms | {result.details}")
-
+        print(f"- {result.name:14s} {status:4s} {result.duration_ms:5d} ms | {result.details}")
     passed = sum(1 for item in results if item.passed)
-    total = len(results)
-    print(f"Summary: {passed}/{total} passed")
+    print(f"Summary: {passed}/{len(results)} passed")
 
 
 def save_report(path: str, args: argparse.Namespace, results: list[ScenarioResult]) -> None:
@@ -360,7 +353,6 @@ def save_report(path: str, args: argparse.Namespace, results: list[ScenarioResul
         "scenario": args.scenario,
         "results": [asdict(item) for item in results],
     }
-
     with open(path, "w", encoding="utf-8") as fp:
         json.dump(payload, fp, indent=2)
 
@@ -369,11 +361,9 @@ def main() -> None:
     args = parse_args()
     results = asyncio.run(run_scenarios(args))
     print_results(results)
-
     if args.report:
         save_report(args.report, args, results)
         print(f"Report saved to: {args.report}")
-
     if any(not item.passed for item in results):
         raise SystemExit(1)
 

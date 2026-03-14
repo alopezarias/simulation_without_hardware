@@ -35,6 +35,29 @@ async def handle_message(ctx: AppContext, session: DeviceSession, message: dict[
         await send_session_ready(ctx, session)
         return
 
+    if message_type == "agents.version.request":
+        await send(
+            session,
+            build_message(
+                "agents.version.response",
+                version=ctx.settings.agent_catalog_version,
+                active_agent=session.active_agent,
+            ),
+        )
+        return
+
+    if message_type == "agents.list.request":
+        await send(
+            session,
+            build_message(
+                "agents.list.response",
+                version=ctx.settings.agent_catalog_version,
+                active_agent=session.active_agent,
+                agents=ctx.settings.available_agents,
+            ),
+        )
+        return
+
     if message_type == "agent.select":
         require_fields(message, "agent_id")
         requested = str(message["agent_id"]).strip()

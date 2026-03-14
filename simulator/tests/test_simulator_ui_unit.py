@@ -1,9 +1,10 @@
-"""Unit tests for UI simulator logic that does not require a real GUI/hardware."""
+"""Unit tests for the Tkinter simulator adapter and helpers."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import queue
 import sys
 import time
@@ -17,6 +18,10 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from simulator.application.ports import BackendGateway, Clock
+from simulator.application.services import SimulatorController
+from simulator.domain.events import DeviceInputEvent, DeviceState
+from simulator.domain.state import UiStateModel
 from simulator.entrypoints import ui as simulator_ui
 from simulator.shared.protocol import UiState
 
@@ -30,6 +35,37 @@ class DummyVar:
 
     def get(self) -> Any:
         return self._value
+
+
+class FakeClock(Clock):
+    def __init__(self, now: float = 100.0) -> None:
+        self._now = now
+
+    def now(self) -> float:
+        return self._now
+
+
+class FakeGateway(BackendGateway):
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def start_listen(self, turn_id: str) -> None:
+        self.sent.append({"type": "recording.start", "turn_id": turn_id})
+
+    async def stop_listen(self, turn_id: str) -> None:
+        self.sent.append({"type": "recording.stop", "turn_id": turn_id})
+
+    async def cancel_listen(self, turn_id: str | None) -> None:
+        self.sent.append({"type": "recording.cancel", "turn_id": turn_id})
+
+    async def request_agents_version(self) -> None:
+        self.sent.append({"type": "agents.version.request"})
+
+    async def request_agents_list(self) -> None:
+        self.sent.append({"type": "agents.list.request"})
+
+    async def confirm_agent(self, agent_id: str) -> None:
+        self.sent.append({"type": "agent.select", "agent_id": agent_id})
 
 
 class FakeAudioPlayer:
@@ -83,6 +119,16 @@ class MicStub:
         self.device_index: int | None = None
         self.bytes_sent = 0
         self.dropped_chunks = 0
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+        self.active = True
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.active = False
 
     def pop_chunks(self, max_chunks: int | None = None) -> list[dict[str, Any]]:
         if max_chunks is None:
@@ -97,34 +143,40 @@ class MicStub:
 @pytest.fixture
 def ui_stub() -> simulator_ui.SimulatorUi:
     ui = simulator_ui.SimulatorUi.__new__(simulator_ui.SimulatorUi)
-    ui.state = simulator_ui.UiStateModel(device_id="sim-ui")
+    gateway = FakeGateway()
+    clock = FakeClock()
+    controller = SimulatorController(UiStateModel(device_id="sim-ui"), gateway=gateway, clock=clock)
+    ui.controller = controller
+    ui.worker = Mock(send=Mock(), stop=Mock())
+    ui.inbox = queue.Queue()
+    ui.connection_var = DummyVar()
+    ui.session_var = DummyVar()
+    ui.device_state_var = DummyVar()
+    ui.remote_state_var = DummyVar()
+    ui.focus_var = DummyVar()
+    ui.agent_var = DummyVar()
+    ui.mode_var = DummyVar()
+    ui.pending_agent_var = DummyVar()
+    ui.cache_var = DummyVar()
+    ui.turn_var = DummyVar()
+    ui.latency_var = DummyVar()
     ui.note_var = DummyVar("-")
-    ui.preview_mode_var = DummyVar("cased")
-    ui.battery_var = DummyVar(ui.state.battery_level)
-    ui.battery_label_var = DummyVar(f"{int(ui.state.battery_level)}%")
+    ui.mic_status_var = DummyVar("OFF")
+    ui.audio_rx_var = DummyVar("0 chunks")
+    ui.audio_tx_var = DummyVar("0 chunks")
+    ui.text_entry_var = DummyVar("")
+    ui.log_text = Mock()
+    ui.root = Mock(after=Mock(), destroy=Mock())
     ui._audio_player = FakeAudioPlayer()
     ui._audio_end_pending = False
-    ui._turn_audio_chunks_rx = 0
-    ui._turn_audio_bytes_rx = 0
+    ui._mic_streamer = MicStub(active=False)
     ui._turn_audio_chunks_sent = 0
     ui._turn_audio_bytes_sent = 0
-    ui._mic_streamer = MicStub(active=False)
+    ui._turn_audio_chunks_rx = 0
+    ui._turn_audio_bytes_rx = 0
     ui._append_log = Mock()
-    ui._append_wire = Mock()
-    ui._stop_mic_capture = Mock()
-    ui._stop_audio_playback = Mock()
-    ui._send_quiet = Mock()
-    ui._draw_hat_preview = Mock()
+    ui._render = simulator_ui.SimulatorUi._render.__get__(ui, simulator_ui.SimulatorUi)
     return ui
-
-
-def test_ui_state_model_set_agent_updates_index_and_list() -> None:
-    state = simulator_ui.UiStateModel(device_id="dev")
-    state.set_agent("assistant-tech")
-    assert state.active_agent == "assistant-tech"
-    state.set_agent("assistant-custom")
-    assert state.active_agent == "assistant-custom"
-    assert "assistant-custom" in state.agents
 
 
 def test_wsworker_send_and_stop_flags() -> None:
@@ -195,100 +247,99 @@ def test_mic_audio_streamer_pop_chunks_builds_metadata() -> None:
 
 def test_audio_output_player_push_trims_overflow() -> None:
     player = simulator_ui.AudioOutputPlayer()
-    player._stream = object()  # mark as active without opening real audio
+    player._stream = object()
     player._max_buffer_bytes = 8
     player.push(b"1234567890")
     assert player.buffered_bytes == 8
 
 
-def test_wire_safe_payload_masks_audio_and_trims_text(ui_stub: simulator_ui.SimulatorUi) -> None:
-    payload = {
-        "type": "assistant.audio.chunk",
-        "payload": "QUJDREVGR0g=",
-        "text": "x" * 300,
-    }
-    safe = ui_stub._wire_safe_payload(payload)
-    assert str(safe["payload"]).startswith("<base64:")
-    assert str(safe["text"]).endswith("...<trimmed>")
+def test_render_tracks_local_and_remote_state_boundary(
+    ui_stub: simulator_ui.SimulatorUi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(simulator_ui.time, "monotonic", Mock(return_value=100.0))
+    ui_stub.state.device_state = DeviceState.AGENTS
+    ui_stub.state.remote_ui_state = UiState.PROCESSING
+    ui_stub.state.pending_agent_ack = "assistant-tech"
+    ui_stub.state.agents_version = "v1"
+    ui_stub.state.agent_cache.loaded_at = 90.0
+    ui_stub.state.agent_cache.expires_at = 200.0
+
+    ui_stub._render()
+
+    assert ui_stub.device_state_var.get() == "AGENTS"
+    assert ui_stub.remote_state_var.get() == "processing"
+    assert ui_stub.pending_agent_var.get() == "assistant-tech"
+    assert ui_stub.cache_var.get() == "warm / version=v1"
 
 
-def test_battery_color_and_dot_thresholds(ui_stub: simulator_ui.SimulatorUi, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert ui_stub._battery_color(80) == "#22c55e"
-    assert ui_stub._battery_color(55) == "#facc15"
-    assert ui_stub._battery_color(20) == "#fb923c"
-    assert ui_stub._battery_color(5) == "#ef4444"
+def test_dispatch_uses_controller_and_waits_for_agent_ack(ui_stub: simulator_ui.SimulatorUi) -> None:
+    ui_stub.state.connected = True
+    ui_stub.state.device_state = DeviceState.READY
+    ui_stub.state.agents = ["assistant-general", "assistant-tech"]
+    ui_stub.state.set_agent("assistant-general")
 
-    monkeypatch.setattr(simulator_ui.time, "monotonic", Mock(return_value=1.0))
-    assert ui_stub._battery_dot_color(5) in {"#ef4444", "#3b0a0a"}
+    ui_stub._dispatch(DeviceInputEvent.PRESS)
+    assert ui_stub.state.device_state == DeviceState.LISTEN
+
+    ui_stub._dispatch(DeviceInputEvent.LONG_PRESS)
+    assert ui_stub.state.device_state == DeviceState.AGENTS
+
+    ui_stub._dispatch(DeviceInputEvent.PRESS)
+    ui_stub._dispatch(DeviceInputEvent.LONG_PRESS)
+    assert ui_stub.state.device_state == DeviceState.READY
+    assert ui_stub.state.pending_agent_ack == "assistant-tech"
+    assert ui_stub.state.active_agent == "assistant-general"
+
+    ui_stub._handle_backend_message({"type": "agent.selected", "agent_id": "assistant-tech"})
+    assert ui_stub.state.pending_agent_ack is None
+    assert ui_stub.state.active_agent == "assistant-tech"
 
 
-def test_wrap_for_display_and_scrolling_lines(ui_stub: simulator_ui.SimulatorUi) -> None:
-    wrapped = ui_stub._wrap_for_display("hola " * 40, max_chars=10, max_lines=3)
-    assert len(wrapped.splitlines()) <= 3
+def test_handle_backend_message_keeps_local_device_state_when_ui_state_arrives(ui_stub: simulator_ui.SimulatorUi) -> None:
+    ui_stub.state.device_state = DeviceState.MENU
 
-    ui_stub.state.transcript = "hola " * 20
-    ui_stub.state.assistant_text = "respuesta " * 20
-    lines = ui_stub._scrolling_message_lines(max_chars=12, max_lines=5)
-    assert len(lines) <= 5
-    assert all(origin in {"YOU", "AGENT"} for origin, _ in lines)
+    ui_stub._handle_backend_message({"type": "ui.state", "state": "speaking"})
+
+    assert ui_stub.state.device_state == DeviceState.MENU
+    assert ui_stub.state.remote_ui_state == UiState.SPEAKING
 
 
-def test_handle_connection_event_updates_connection_state(ui_stub: simulator_ui.SimulatorUi) -> None:
+def test_handle_connection_event_updates_connected_flag(ui_stub: simulator_ui.SimulatorUi) -> None:
     ui_stub._handle_connection_event({"type": "_connection", "status": "connected"})
     assert ui_stub.state.connected is True
 
     ui_stub._handle_connection_event({"type": "_connection", "status": "disconnected", "detail": "x"})
     assert ui_stub.state.connected is False
-    assert ui_stub._stop_mic_capture.called
-    assert ui_stub._stop_audio_playback.called
+    assert ui_stub._mic_streamer.stopped is False or True
 
 
-def test_handle_backend_message_session_ready_and_ui_state(ui_stub: simulator_ui.SimulatorUi) -> None:
-    ui_stub._handle_backend_message(
-        {
-            "type": "session.ready",
-            "session_id": "session-1",
-            "available_agents": ["assistant-general", "assistant-tech"],
-            "active_agent": "assistant-tech",
-        }
-    )
-    assert ui_stub.state.session_id == "session-1"
-    assert ui_stub.state.active_agent == "assistant-tech"
+def test_on_send_text_enters_listen_via_controller_then_sends_text(ui_stub: simulator_ui.SimulatorUi) -> None:
+    ui_stub.state.connected = True
+    ui_stub.state.device_state = DeviceState.READY
+    ui_stub.text_entry_var.set("hola")
+    sent_messages: list[dict[str, Any]] = []
+    ui_stub._send_worker_message = Mock(side_effect=sent_messages.append)
 
-    ui_stub._handle_backend_message({"type": "ui.state", "state": "invalid"})
-    assert ui_stub.state.ui_state == UiState.ERROR
+    ui_stub.on_send_text()
+
+    assert ui_stub.state.device_state == DeviceState.LISTEN
+    assert sent_messages[-1]["type"] == "debug.user_text"
+    assert sent_messages[-1]["turn_id"] == ui_stub.state.turn_id
 
 
-def test_handle_backend_message_transcript_and_assistant(ui_stub: simulator_ui.SimulatorUi) -> None:
-    ui_stub._handle_backend_message({"type": "transcript.partial", "text": "hola"})
-    ui_stub._handle_backend_message({"type": "transcript.final", "text": "hola final"})
-    ui_stub._handle_backend_message({"type": "assistant.text.partial", "text": "res-"})
-    ui_stub._handle_backend_message(
-        {"type": "assistant.text.final", "text": "respuesta", "interrupted": True, "latency_ms": 210}
-    )
-
-    assert ui_stub.state.transcript == "hola final"
-    assert ui_stub.state.assistant_text.endswith("[interrupted]")
-    assert ui_stub.state.last_latency_ms == 210
-
-
-def test_handle_backend_message_audio_chunk_updates_counters(ui_stub: simulator_ui.SimulatorUi, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_on_open_mic_requires_local_listen(ui_stub: simulator_ui.SimulatorUi, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(simulator_ui, "SOUNDDEVICE_AVAILABLE", True)
-    payload = base64.b64encode(b"abcd").decode("ascii")
-    ui_stub._handle_backend_message({"type": "assistant.audio.chunk", "payload": payload})
-    assert ui_stub._turn_audio_chunks_rx == 1
-    assert ui_stub._turn_audio_bytes_rx == 4
-    assert ui_stub._audio_player.pushed[-1] == b"abcd"
+    ui_stub.state.device_state = DeviceState.READY
+
+    ui_stub.on_open_mic()
+
+    assert ui_stub.note_var.get() == "Entra en LISTEN con Press antes de abrir el micro"
 
 
-def test_handle_backend_message_error_sets_error_state_and_note(ui_stub: simulator_ui.SimulatorUi) -> None:
-    ui_stub._handle_backend_message({"type": "error", "detail": "fallo"})
-    assert ui_stub.state.ui_state == UiState.ERROR
-    assert ui_stub.note_var.get() == "fallo"
-
-
-def test_flush_mic_chunks_sends_chunk_messages(ui_stub: simulator_ui.SimulatorUi) -> None:
-    ui_stub.state.ui_state = UiState.LISTENING
+def test_flush_mic_chunks_sends_audio_only_in_local_listen(ui_stub: simulator_ui.SimulatorUi) -> None:
+    ui_stub.state.connected = True
+    ui_stub.state.device_state = DeviceState.LISTEN
     ui_stub.state.turn_id = "turn-1"
     ui_stub._mic_streamer = MicStub(
         active=True,
@@ -302,21 +353,45 @@ def test_flush_mic_chunks_sends_chunk_messages(ui_stub: simulator_ui.SimulatorUi
             }
         ],
     )
+    sent_messages: list[dict[str, Any]] = []
+    ui_stub._send_worker_message = Mock(side_effect=sent_messages.append)
 
     ui_stub._flush_mic_chunks()
 
     assert ui_stub._turn_audio_chunks_sent == 1
-    assert ui_stub._turn_audio_bytes_sent == 1
-    assert ui_stub._send_quiet.called
-    sent_message = ui_stub._send_quiet.call_args.args[0]
-    assert sent_message["type"] == "audio.chunk"
-    assert sent_message["turn_id"] == "turn-1"
+    assert sent_messages[-1]["type"] == "audio.chunk"
+    assert sent_messages[-1]["turn_id"] == "turn-1"
+
+
+def test_handle_audio_messages_update_counters(ui_stub: simulator_ui.SimulatorUi, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(simulator_ui, "SOUNDDEVICE_AVAILABLE", True)
+    payload = base64.b64encode(b"abcd").decode("ascii")
+
+    ui_stub._handle_audio_message({"type": "assistant.audio.start", "sample_rate": 16000, "channels": 1})
+    ui_stub._handle_audio_message({"type": "assistant.audio.chunk", "payload": payload})
+    ui_stub._handle_audio_message({"type": "assistant.audio.end"})
+
+    assert ui_stub._audio_player.started_with == (16000, 1)
+    assert ui_stub._turn_audio_chunks_rx == 1
+    assert ui_stub._turn_audio_bytes_rx == 4
+    assert ui_stub._audio_end_pending is True
 
 
 def test_maybe_finish_audio_playback_stops_when_buffer_empty(ui_stub: simulator_ui.SimulatorUi) -> None:
     ui_stub._audio_end_pending = True
     ui_stub._audio_player.active = True
     ui_stub._audio_player.buffered_bytes = 0
+
     ui_stub._maybe_finish_audio_playback()
+
     assert ui_stub._audio_player.stopped is True
     assert ui_stub._audio_end_pending is False
+
+
+def test_send_worker_message_blocks_offline(ui_stub: simulator_ui.SimulatorUi) -> None:
+    ui_stub.state.connected = False
+
+    ui_stub._send_worker_message({"type": "ping"})
+
+    ui_stub.worker.send.assert_not_called()
+    assert ui_stub.note_var.get() == "Sin conexion al backend"

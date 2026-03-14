@@ -68,6 +68,8 @@ async def send_session_ready(ctx: AppContext, session: DeviceSession) -> None:
             device_id=session.device_id,
             active_agent=session.active_agent,
             available_agents=ctx.settings.available_agents,
+            agents_version=ctx.settings.agent_catalog_version,
+            agents_cache_seed=True,
             protocol_version="0.2",
             speech=ctx.speech.capabilities(),
             audio_reply_mode=ctx.settings.audio_reply_mode,

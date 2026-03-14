@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from hashlib import sha1
 from dataclasses import dataclass
 
 
@@ -21,6 +22,11 @@ class BackendSettings:
     available_agents: list[str]
     allowed_device_ids: set[str]
     log_level: str
+
+    @property
+    def agent_catalog_version(self) -> str:
+        payload = "\n".join(self.available_agents).encode("utf-8")
+        return sha1(payload).hexdigest()[:12]
 
     @classmethod
     def from_env(cls) -> "BackendSettings":

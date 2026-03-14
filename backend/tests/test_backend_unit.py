@@ -212,6 +212,12 @@ def test_sync_runtime_forces_supported_audio_reply_mode(monkeypatch: pytest.Monk
     assert backend.AUDIO_REPLY_MODE == "assistant"
 
 
+def test_backend_settings_exposes_stable_agent_catalog_version() -> None:
+    version = backend._container.settings.agent_catalog_version
+    assert isinstance(version, str)
+    assert len(version) == 12
+
+
 @pytest.mark.asyncio
 async def test_start_recording_configures_session_and_opens_pcm_file() -> None:
     websocket = FakeWebSocket()
@@ -573,6 +579,8 @@ async def test_send_session_ready_emits_protocol_and_capabilities(monkeypatch: p
     assert msg["type"] == "session.ready"
     assert msg["audio_reply_mode"] == "assistant"
     assert msg["speech"] == {"stt_available": True}
+    assert msg["agents_version"] == backend._container.settings.agent_catalog_version
+    assert msg["agents_cache_seed"] is True
 
 
 @pytest.mark.asyncio
@@ -614,6 +622,42 @@ async def test_handle_message_agent_select_valid_and_invalid() -> None:
     websocket.sent.clear()
     await backend.handle_message(session, {"type": "agent.select", "agent_id": backend.AVAILABLE_AGENTS[0]})
     assert websocket.sent[0]["type"] == "agent.selected"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_agents_version_request_returns_lightweight_version() -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+    session.authenticated = True
+
+    await backend.handle_message(session, {"type": "agents.version.request"})
+
+    assert websocket.sent[0]["type"] == "agents.version.response"
+    assert websocket.sent[0]["version"] == backend._container.settings.agent_catalog_version
+    assert "agents" not in websocket.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_agents_list_request_returns_catalog_and_active_agent() -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+    session.authenticated = True
+
+    await backend.handle_message(session, {"type": "agents.list.request"})
+
+    assert websocket.sent[0]["type"] == "agents.list.response"
+    assert websocket.sent[0]["agents"] == backend.AVAILABLE_AGENTS
+    assert websocket.sent[0]["active_agent"] == session.active_agent
+
+
+def test_validate_device_message_accepts_new_agent_catalog_requests() -> None:
+    assert backend.validate_device_message({"type": "agents.version.request"})["type"] == "agents.version.request"
+    assert backend.validate_device_message({"type": "agents.list.request"})["type"] == "agents.list.request"
+
+
+def test_backend_ui_state_contract_stays_remote_only() -> None:
+    remote_states = {state.value for state in UiState}
+    assert remote_states == {"idle", "listening", "processing", "speaking", "error"}
 
 
 @pytest.mark.asyncio
