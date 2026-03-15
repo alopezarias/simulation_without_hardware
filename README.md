@@ -1,116 +1,170 @@
 # Simulation without Hardware
 
-Primera base funcional del proyecto de dispositivo conversacional, centrada en validar protocolo, estados, UX del boton e integracion backend sin hardware real.
+Python MVP for a conversational device before real hardware exists. The repository lets you exercise the device protocol, state machine, button UX, backend orchestration, streaming audio flow, and Raspberry Pi runtime packaging using a local simulator instead of a physical build.
 
-## Componentes
+## Why this project is interesting
 
-- `backend/`: proyecto backend independiente (FastAPI + WebSocket), desplegable sin dependencias del simulador.
-- `backend/api.py`: fachada de compatibilidad del backend y entrypoint para `python -m uvicorn backend.api:app`.
-- `backend/bootstrap.py`: composition root y wiring de adapters/servicios.
-- `backend/run.py`: launcher recomendado (`python -m backend.run`) para evitar usar otro intérprete por error.
-- `backend/infrastructure/ai/openclawd_adapter.py`: cliente OpenClawd usado por el adapter de infraestructura.
-- `backend/infrastructure/speech/speech_pipeline.py`: pipeline local de voz usado por el adapter de infraestructura.
-- `backend/shared/protocol.py`: utilidades de protocolo y estados compartidos.
-- `simulator/`: proyecto simulador independiente (CLI/UI/QA) para emular hardware.
-- `device_runtime/`: runtime compartido extraido del simulador, con core comun y adapters reutilizables para simulacion/dev y Raspberry Pi.
-- `simulator/entrypoints/cli.py`: simulador CLI.
-- `simulator/entrypoints/ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
-- `simulator/qa/smoke_test.py`: prueba end-to-end automatizada.
-- `simulator/qa/scenario_runner.py`: ejecutor de escenarios de simulacion repetibles (baseline/interrupcion/cancelacion).
+- It validates a hardware-oriented product with software-only tooling.
+- It keeps backend, simulator, and device runtime concerns separated while sharing the same protocol and state model.
+- It supports both fast local iteration (`mock` agent mode) and more realistic integrations (`http` and `ws` OpenClawd adapters).
+- It already includes CLI, desktop UI, smoke tests, scenario-based QA, and a Raspberry/device runtime entrypoint.
 
-## Estructura hexagonal
+## What is inside
 
-Backend (`backend/`):
-- `backend/config/settings.py`: configuracion runtime desde entorno.
-- `backend/domain/session.py`: estado de sesion del dispositivo.
-- `backend/application/ports.py`: puertos de IA, voz, salida y audio-store.
-- `backend/application/services/*`: casos de uso (`message_bus`, `recording`, `turn_processing`, `message_router`, `session_init`).
-- `backend/infrastructure/*`: adapters concretos (WebSocket, OpenClawd, Speech, audio temporal, logging).
+### Main pieces
 
-Simulator (`simulator/`):
-- `simulator/domain/*`, `simulator/application/*`, `simulator/infrastructure/*`: capas del simulador.
-- `simulator/entrypoints/*`: entradas ejecutables (CLI/UI) que ensamblan esas capas.
-- `simulator/shared/protocol.py`: contrato de mensajes del lado simulador.
+| Area | Purpose |
+| --- | --- |
+| `backend/` | FastAPI + WebSocket backend that manages sessions, protocol events, speech pipeline, agent routing, and device-facing responses. |
+| `simulator/` | CLI and Tkinter UI that emulate the device interactions, transport, and local audio behavior. |
+| `device_runtime/` | Shared runtime extracted from the simulator for reusable device logic and Raspberry Pi-oriented adapters. |
+| `docs/` | ADRs and supporting design notes. |
 
-Runtime compartido (`device_runtime/`):
-- `device_runtime/application/services/*`: state machine, protocolo, controller, display model y configuracion del runtime.
-- `device_runtime/infrastructure/audio/*`: chunker, adapters `sounddevice` para desarrollo, `null_*` para degradacion y scaffolding ALSA para Raspberry Pi.
-- `device_runtime/infrastructure/input/*`: adapters `keyboard`, `null` y scaffolding `gpio`.
-- `device_runtime/infrastructure/display/*`: preview Tk, `null` y scaffolding `whisplay`.
-- `device_runtime/entrypoints/raspi_main.py`: bootstrap de composicion para runtime Raspberry Pi/degradado.
+### Core capabilities today
 
-## Flujo MVP cubierto
+- Session handshake: `device.hello` -> `session.ready`
+- Device interaction semantics: `Tap`, `Double Tap`, `Long Press`, interrupt, and cancel
+- Agent switching through `agent.select` / `agent.selected`
+- Streaming responses with `assistant.text.partial` and `assistant.text.final`
+- Audio input through `audio.chunk`
+- Audio response streaming through `assistant.audio.start`, `assistant.audio.chunk`, and `assistant.audio.end`
+- Local speech loop with Whisper STT and local TTS
+- Optional basic device auth with token + allowlist
+- Shared runtime bootstrapping for non-hardware and Raspberry-style setups
 
-- `device.hello` -> `session.ready`.
-- `agent.select` y confirmacion `agent.selected`.
-- `recording.start` / `recording.stop` / `recording.cancel`.
-- `debug.user_text` para fase de simulacion logica.
-- `audio.chunk` en streaming desde micro local (modo `mic` en UI).
-- `audio.chunk` en streaming desde micro local (auto al hacer `Tap`, y tambien con botones `Abrir Mic` / `Cerrar Mic`).
-- Reensamblado de audio en backend (archivo temporal PCM).
-- Transcripcion local con Whisper (`faster-whisper`) y sintesis local TTS (`pyttsx3`).
-- Streaming de audio de respuesta `assistant.audio.*` por chunks hacia el simulador.
-- Modo de respuesta configurable: `AUDIO_REPLY_MODE=assistant` (respuesta del agente) o `AUDIO_REPLY_MODE=echo` (repite lo transcrito en audio).
-- Respuesta en streaming con `assistant.text.partial` y `assistant.text.final`.
-- Interrupcion con `assistant.interrupt`.
-- Estados `idle`, `listening`, `processing`, `speaking`, `error`.
-- Auth basica opcional por token de dispositivo.
+## Architecture at a glance
 
-## Arranque rapido
+The repository follows a hexagonal direction.
 
-Consulta [RUNBOOK.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/RUNBOOK.md) para comandos completos por escenario.
+- `backend/` is organized into `domain`, `application`, `infrastructure`, and `config`, with `backend/run.py` as the recommended launcher and `backend/api.py` as the compatibility entrypoint.
+- `simulator/` contains domain/application/infrastructure layers plus executable entrypoints for the CLI and desktop UI.
+- `device_runtime/` concentrates reusable runtime services and adapters for audio, input, and display, including development-friendly adapters and Raspberry Pi scaffolding that degrades safely when host libraries are missing.
 
-## Dependencias por proyecto
+In practice, the flow is:
 
-Solo backend (despliegue servidor):
+1. A simulator or runtime connects to the backend over WebSocket.
+2. The backend manages session state and routes device events.
+3. User input can travel as debug text or audio chunks.
+4. The backend produces streaming text and optional audio responses.
+5. The simulator UI or runtime renders the result as if it were the device.
 
-```bash
-source .venv/bin/activate
-pip install -r backend/requirements.txt
-```
+## Quick start
 
-Solo simulador (entorno local):
-
-```bash
-source .venv/bin/activate
-pip install -r simulator/requirements.txt
-```
-
-Todo junto (desarrollo local):
-
-```bash
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-```
-
-## Tests unitarios (backend + simulador + runtime compartido)
-
-Instalacion:
+### 1. Create an environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
+cp .env.example .env
 ```
 
-Ejecucion completa:
+If you want microphone support on macOS, install PortAudio first:
+
+```bash
+brew install portaudio
+```
+
+### 2. Start the backend
+
+```bash
+python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
+```
+
+Health check:
+
+```bash
+curl -s http://127.0.0.1:8000/health
+```
+
+### 3. Run one of the clients
+
+CLI simulator:
+
+```bash
+python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws
+```
+
+Desktop simulator UI:
+
+```bash
+python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws
+```
+
+Shared runtime bootstrap:
+
+```bash
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
+```
+
+## Common workflows
+
+### Run the full test suite
 
 ```bash
 pytest
 ```
 
-Nota: `pytest.ini` ya fuerza `-p no:capture` para evitar un `segfault` del plugin de captura en este entorno e incluye por defecto `backend/tests`, `simulator/tests` y `device_runtime/tests`.
+`pytest.ini` is configured so bare `pytest` covers `backend/tests`, `simulator/tests`, and `device_runtime/tests`.
 
-## Runtime Raspberry Pi / adapters compartidos
+### Run automated simulator QA
 
-Bootstrap minimo del runtime comun sin hardware real:
+Smoke test with a backend already running:
 
 ```bash
-source .venv/bin/activate
-DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
+python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws
 ```
 
-Variables utiles para seleccionar adapters:
+Scenario runner:
+
+```bash
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario all
+```
+
+### Use the local speech loop
+
+The default `.env.example` enables local Whisper STT and local TTS. For a simple audio-to-text-to-audio loopback, run the backend in `echo` mode:
+
+```bash
+ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
+```
+
+### Switch installation scope when needed
+
+Backend only:
+
+```bash
+pip install -r backend/requirements.txt
+```
+
+Simulator only:
+
+```bash
+pip install -r simulator/requirements.txt
+```
+
+## Repository layout
+
+```text
+.
+|- backend/          FastAPI backend, protocol services, speech pipeline, tests
+|- simulator/        CLI/UI simulator, QA runners, tests
+|- device_runtime/   Shared device runtime and Raspberry-oriented adapters
+|- docs/             ADRs and design notes
+|- RUNBOOK.md        Detailed operational walkthroughs
+|- OPENCLAWD_WS_SETUP.md
+|- MVP_ALIGNMENT.md
+|- pytest.ini
+|- requirements*.txt
+```
+
+## Raspberry Pi and adapter notes
+
+- `device_runtime/` includes `null`, development, and Raspberry-oriented adapter options for display, button input, and audio I/O.
+- The Raspberry-targeted adapters are designed to fall back to safe `null_*` behavior with clear warnings when host-specific dependencies are unavailable.
+- The simulator UI already reuses shared runtime adapters such as keyboard button handling and `sounddevice` audio paths.
+
+Useful environment variables:
 
 ```env
 DEVICE_DISPLAY_ADAPTER=null|whisplay
@@ -120,19 +174,25 @@ DEVICE_AUDIO_OUT_ADAPTER=null|sounddevice|alsa
 DEVICE_FAIL_FAST_ON_MISSING_BUTTON=false
 ```
 
-Notas:
-- Los adapters Raspberry Pi reales degradan a `null_*` con warnings claros si faltan dependencias del host.
-- El simulador UI ya reutiliza los adapters compartidos `keyboard_button`, `sounddevice_capture` y `sounddevice_playback`.
+## Current status
 
-## OpenClawd WebSocket
+This is an MVP focused on reducing risk before hardware integration.
 
-Configuracion detallada en [OPENCLAWD_WS_SETUP.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/OPENCLAWD_WS_SETUP.md).
+- Strong coverage: protocol contract, device states, button semantics, simulator UX, backend orchestration, local speech pipeline, and automated scenario testing.
+- Partial/iterative areas: production-grade hardware adapters, final embedded hardening, and real-device deployment concerns.
 
-## Encaje con especificacion final
+`MVP_ALIGNMENT.md` documents the current scope against the broader conversational-device vision.
 
-Consulta [MVP_ALIGNMENT.md](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/MVP_ALIGNMENT.md) para el contraste detallado entre este MVP y el documento final del proyecto.
+## Documentation map
 
-## ADR
+- `RUNBOOK.md` - step-by-step setup, manual checks, and test flows
+- `OPENCLAWD_WS_SETUP.md` - WebSocket/OpenClawd integration details
+- `MVP_ALIGNMENT.md` - what this MVP covers and what remains outside scope
+- `docs/adr/ADR-0001-foundations-and-evolution.md` - architectural foundations and evolution
+- `docs/adr/ADR-0002-simulator-testing-and-hexagonal-plan.md` - simulator testing strategy and refactor direction
 
-- Backend y evolucion general: [ADR-0001](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0001-foundations-and-evolution.md).
-- Estrategia de testing y refactor del simulador: [ADR-0002](/Users/user/Documents/projects/ai/ia_device/simulation_without_hardware/docs/adr/ADR-0002-simulator-testing-and-hexagonal-plan.md).
+## Notes for first-time visitors
+
+- Start with `mock` mode if you just want to understand the protocol and UI behavior quickly.
+- Use the desktop UI when you want the closest preview of the intended device experience.
+- Use the shared runtime entrypoint when validating packaging and adapter behavior closer to Raspberry deployment.

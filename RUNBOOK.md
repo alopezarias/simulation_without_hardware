@@ -1,299 +1,285 @@
-# Runbook de pruebas
+# Runbook
 
-## 0. Preparacion (una sola vez)
+This runbook is the practical companion to `README.md`. It is meant for someone inspecting the repository on GitHub and wanting to reproduce the MVP locally: start the backend, run the simulator, exercise the shared device runtime, and validate the current test coverage.
+
+All commands assume you are running from the repository root.
+
+## What this runbook covers
+
+- local environment setup
+- backend startup and health checks
+- simulator CLI and desktop UI flows
+- shared `device_runtime/` bootstrap without physical hardware
+- manual validation scenarios for the conversational-device MVP
+- automated checks and optional integration modes
+
+## 1. Prepare the environment
+
+Create a virtual environment and install the development dependencies used across the repository:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Instalacion separada por proyecto (opcional):
+If you only need part of the repository, these narrower installs are also available:
 
 ```bash
-# backend solo
 pip install -r backend/requirements.txt
-
-# simulador solo
 pip install -r simulator/requirements.txt
 ```
 
-Si vas a usar micro en macOS, instala PortAudio:
+If you plan to use microphone input on macOS, install PortAudio first:
 
 ```bash
 brew install portaudio
 ```
 
-Dependencias de voz local (Whisper + TTS):
+Notes:
+
+- The default `.env.example` enables local Whisper STT and local TTS.
+- The first Whisper transcription downloads the configured model from `WHISPER_MODEL_SIZE` (default: `base`).
+
+## 2. Start the backend
+
+Standard local run:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Nota: la primera transcripcion con Whisper descarga el modelo configurado (`WHISPER_MODEL_SIZE`), por defecto `base`.
-
-## 1. Arrancar backend
-
-```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
 python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
 ```
 
-Modo `echo` (audio->texto->audio sin pasar por agente):
-
-```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
-source .venv/bin/activate
-ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
-```
-
-Si en macOS falla `pyttsx3`, fuerza el backend de voz nativo:
-
-```bash
-ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
-```
-
-## 2. Verificar backend vivo
+Health check:
 
 ```bash
 curl -s http://127.0.0.1:8000/health
 ```
 
-## 3. Probar simulador CLI
+Simple audio-to-text-to-audio loopback using the local speech pipeline:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
+source .venv/bin/activate
+ENABLE_WHISPER_STT=true ENABLE_LOCAL_TTS=true AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
+```
+
+If local TTS on macOS has trouble with `pyttsx3`, force the native `say` backend:
+
+```bash
+source .venv/bin/activate
+ENABLE_LOCAL_TTS=true TTS_BACKEND=say AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
+```
+
+## 3. Run a client
+
+CLI simulator:
+
+```bash
 source .venv/bin/activate
 python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws
 ```
 
-Comandos dentro del CLI:
+Useful CLI commands once connected:
 
 ```text
 help
 state
+tap
 double
-tap
-text hola esta es una prueba
+text hello this is a test
 send
-tap
 long
 quit
 ```
 
-## 4. Probar simulador UI (ventana)
+Desktop simulator UI:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
 python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws
 ```
 
-Controles UI:
+The UI is the closest preview of the intended device experience in this repository. It exposes button interactions, text submission, microphone controls, transport tracing, and streaming response state in one window.
 
-- Botones: `Tap`, `Double Tap`, `Long Press`, `Enviar Texto`.
-- Teclado: `Space` (tap), doble `Space` rapido (double tap), `Esc` (long press).
-- Flujo rapido de audio: `Tap` abre escucha + micro automaticamente; siguiente `Tap` cierra y envia turno.
-- En turnos de micro (audio real sin texto manual), el backend responde con eco del transcript (STT->texto->TTS) para validar el loop completo de hardware simulado.
-- Botones de audio: `Abrir Mic` y `Cerrar Mic` para control manual sin cambiar estado del turno.
-- Boton `Refrescar Mic` + selector `Dispositivo Mic` para elegir el microfono real.
-- La mini pantalla muestra barra superior de estado (LED, red, bateria) y bloques de texto de envio/respuesta.
-- A la derecha tienes una terminal de trafico WS con JSON `TX` y `RX` en tiempo real.
-- Indicador `Mic` con punto rojo parpadeante cuando esta grabando.
-- Contadores en tiempo real: `Chunks TX`/`Audio TX` y `Chunks RX`/`Audio RX`.
-- Indicador `Audio OUT` para ver si la reproduccion de audio de backend esta activa.
-- Puedes ajustar la bateria manualmente con el slider `Bateria`.
-- Selector `Vista`: `cased` (carcasa) o `bare` (sin carcasa).
-- Botones de simulacion: `Turno`, `Interrupcion`, `Cancelacion`.
+## 4. Bootstrap the shared runtime without hardware
 
-## 4.1 Probar bootstrap del runtime comun sin hardware
+The repository also includes a reusable runtime intended for Raspberry Pi-oriented deployment. You can bootstrap it locally without real device peripherals:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
 DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
 ```
 
-Variantes utiles:
+Useful variants:
 
 ```bash
-# development/shared adapters
+# development-friendly shared adapters
 DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_BUTTON_ADAPTER=keyboard DEVICE_AUDIO_IN_ADAPTER=sounddevice DEVICE_AUDIO_OUT_ADAPTER=sounddevice python -m device_runtime.entrypoints.raspi_main
 
-# scaffolding Raspberry Pi con degradacion segura si faltan libs
+# Raspberry-oriented adapter selection with safe degradation when host libraries are missing
 DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_DISPLAY_ADAPTER=whisplay DEVICE_BUTTON_ADAPTER=gpio DEVICE_AUDIO_IN_ADAPTER=alsa DEVICE_AUDIO_OUT_ADAPTER=alsa python -m device_runtime.entrypoints.raspi_main
 ```
 
-Resultado esperado:
-- El proceso importa correctamente aunque falten librerias/vendor de Raspberry Pi.
-- El snapshot inicial queda con warnings tipo `screen unavailable`, `button unavailable` o `audio_* unavailable` cuando corresponde.
-- El simulador actual sigue funcionando por separado con `python -m simulator.entrypoints.ui`.
+Expected behavior:
 
-## 5. Escenarios funcionales para probar
+- the entrypoint starts as long as `DEVICE_ID` and `DEVICE_WS_URL` are provided
+- missing Raspberry-specific libraries degrade to safe `null_*` behavior with warnings
+- simulator entrypoints continue to work independently of the shared runtime
 
-### Escenario A: handshake de sesion
+## 5. Manual validation scenarios
 
-1. Arranca backend.
-2. Arranca la UI con `python -m simulator.entrypoints.ui`.
-3. Comprueba en la UI: conexion `connected`, `session_id` visible y estado `idle`.
+These checks are useful when confirming that the hardwareless MVP still behaves like the intended conversational device.
 
-### Escenario B: cambio de agente
+### Session handshake
 
-1. Estando en `idle`, pulsa `Double Tap`.
-2. Verifica que cambia el agente activo y llega `agent.selected`.
+1. Start the backend.
+2. Launch the UI with `python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws`.
+3. Confirm the UI reaches `connected`, shows a `session_id`, and settles in `idle`.
 
-### Escenario C: turno completo con texto debug
+### Agent switching
 
-1. Pulsa `Tap` (pasa a `listening`).
-2. Escribe texto y pulsa `Enviar Texto`.
-3. Pulsa `Tap` para cerrar turno.
-4. Verifica transcripcion final, respuesta parcial/final y vuelta a `idle`.
+1. From `idle`, trigger `Double Tap`.
+2. Confirm the active agent changes and an `agent.selected` event arrives.
 
-### Escenario C2: turno con audio por micro
+### Text turn
 
-1. Pulsa `Refrescar Mic` y elige `Dispositivo Mic`.
-2. Pulsa `Tap` para entrar en `LISTENING` (el micro se abre automaticamente).
-3. Habla unos segundos.
-4. Pulsa `Tap` otra vez para cerrar turno y enviar audio.
-5. Revisa:
-   - terminal WS lateral con varios `audio.chunk` enviados,
-   - logs del backend con `audio.chunk received ... size_kb=...`,
-   - `transcript.final` con texto reconocido por Whisper,
-   - en la respuesta del backend, eventos `assistant.audio.start/chunk/end`,
-   - contador `Audio RX` subiendo y `Audio OUT` en `ON` durante reproduccion.
+1. Trigger `Tap` to enter `listening`.
+2. Enter debug text and submit it.
+3. Trigger `Tap` again to close the turn.
+4. Confirm a full cycle: transcript, streaming assistant text, final response, and return to `idle`.
 
-### Escenario C2b: prueba definitiva (audio->texto->audio en echo)
+### Microphone turn
 
-1. Arranca backend en modo echo:
+1. Refresh the microphone list and select a real input device.
+2. Trigger `Tap` to enter `listening` and begin capture.
+3. Speak for a few seconds.
+4. Trigger `Tap` again to close the turn and send audio.
+5. Confirm:
 
-```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
-source .venv/bin/activate
-ENABLE_WHISPER_STT=true WHISPER_MODEL_SIZE=tiny ENABLE_LOCAL_TTS=true TTS_BACKEND=auto AUDIO_REPLY_MODE=echo python -m backend.run --host 127.0.0.1 --port 8000 --reload --env-file .env
+```text
+- multiple audio.chunk messages are transmitted
+- backend logs report received audio chunks
+- a transcript final event is produced by Whisper
+- assistant.audio.start/chunk/end events are returned when audio output is enabled
+- the UI counters and audio indicators move as expected
 ```
 
-2. Abre la UI (`python -m simulator.entrypoints.ui`), habla y cierra con `Tap`.
-3. Comprueba:
-   - `transcript.final` con el texto reconocido,
-   - `assistant.text.final` con ese mismo texto (modo `echo`),
-   - reproducción en la UI por `assistant.audio.*` (`source=tts` en logs).
+### Echo-mode speech loop
 
-### Escenario C3: loopback audio manual (botones)
+1. Start the backend in `AUDIO_REPLY_MODE=echo`.
+2. Open the UI and complete a microphone turn.
+3. Confirm:
 
-1. Pulsa `Tap` para entrar en `LISTENING`.
-2. Pulsa `Refrescar Mic` y elige `Dispositivo Mic`.
-3. Pulsa `Abrir Mic` y habla unos segundos.
-4. Pulsa `Cerrar Mic`.
-5. Pulsa `Tap` para cerrar turno.
-6. Verifica los mismos puntos que en C2.
+```text
+- transcript.final contains the recognized speech
+- assistant.text.final mirrors that text in echo mode
+- assistant.audio.* events are emitted for local playback
+```
 
-### Si no detecta microfono
+### Interrupt and cancel behavior
 
-1. En macOS, habilita permisos de microfono para la app terminal/IDE (System Settings -> Privacy & Security -> Microphone).
-2. Cierra y vuelve a abrir la terminal.
-3. Ejecuta `Refrescar Mic` en la UI.
-4. Si sigue sin detectar, revisa el campo `Mic Error` en la esquina superior izquierda.
+- While the assistant is `speaking`, trigger `Tap` or `Long Press` to verify interruption back to `idle`.
+- While `listening`, trigger `Long Press` to verify cancellation without an assistant reply.
 
-### Escenario D: interrupcion de respuesta
+### If the microphone is not detected
 
-1. Lanza un turno como en C.
-2. Mientras esta en `speaking`, pulsa `Tap` o `Long Press`.
-3. Verifica que la respuesta se interrumpe y vuelve a `idle`.
+1. On macOS, grant microphone permission to the terminal or IDE in System Settings.
+2. Restart the terminal session.
+3. Refresh the microphone list in the UI.
+4. If detection still fails, inspect the UI's microphone error field.
 
-### Escenario E: cancelacion de turno
+## 6. Automated validation
 
-1. Pulsa `Tap` para entrar en `listening`.
-2. Pulsa `Long Press`.
-3. Verifica cancelacion y vuelta a `idle` sin respuesta del asistente.
-
-## 6. Smoke test automatizado
-
-Con backend activo:
+Run the full Python test suite:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
+source .venv/bin/activate
+pytest
+```
+
+`pytest.ini` is configured so bare `pytest` runs `backend/tests`, `simulator/tests`, and `device_runtime/tests`.
+
+Run the simulator smoke test against an already running backend:
+
+```bash
 source .venv/bin/activate
 python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws
 ```
 
-Resultado esperado:
+Expected result:
 
 ```text
 SMOKE TEST PASSED
 ```
 
-Smoke local del runtime comun y adapters compartidos:
+Run the scenario runner against an already running backend:
 
 ```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
-source .venv/bin/activate
-pytest device_runtime/tests/test_runtime_foundation.py device_runtime/tests/test_runtime_infrastructure.py device_runtime/tests/test_runtime_adapters.py simulator/tests/test_simulator_ui_unit.py simulator/tests/test_simulator_cli_unit.py
-```
-
-## 7. Ejecutar simulaciones automatizadas (escenarios)
-
-Con backend activo:
-
-```bash
-cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
 source .venv/bin/activate
 python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario all
 ```
 
-Escenario individual:
+Available scenario names at the time of writing:
 
-```bash
-python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario interrupt
+```text
+locked-ready
+listen-agents
+cache-refresh
+agent-ack
+raspi-bootstrap
+raspi-no-mic
+raspi-no-display
+raspi-reconnect
+all
 ```
 
-Escenario de audio loopback:
+Example single-scenario runs:
 
 ```bash
-python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario audio-loopback
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario raspi-bootstrap
+python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario listen-agents
 ```
 
-Guardar reporte JSON:
+Save a JSON report:
 
 ```bash
 python -m simulator.qa.scenario_runner --ws-url ws://127.0.0.1:8000/ws --scenario all --report /tmp/sim_report.json
 ```
 
-## 8. Activar auth basica de dispositivo (opcional)
+## 7. Optional device auth
 
-Editar `.env`:
+Set the backend-side auth values in `.env`:
 
 ```env
-SIM_DEVICE_AUTH_TOKEN=mi-token
+SIM_DEVICE_AUTH_TOKEN=my-token
 SIM_ALLOWED_DEVICE_IDS=sim-device-001,sim-device-ui-001,sim-smoke-001
 ```
 
-Arrancar backend y cliente con token:
+Then pass the same token from the simulator or smoke test:
 
 ```bash
-python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
-python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
-python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws --auth-token mi-token
+python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws --auth-token my-token
+python -m simulator.entrypoints.cli --ws-url ws://127.0.0.1:8000/ws --auth-token my-token
+python -m simulator.qa.smoke_test --ws-url ws://127.0.0.1:8000/ws --auth-token my-token
 ```
 
-## 9. OpenClawd por WebSocket con tunel SSH
+## 8. Optional OpenClawd integration modes
 
-Abrir tunel SSH (ejemplo):
+### WebSocket mode over an SSH tunnel
+
+Open an SSH tunnel, for example:
 
 ```bash
-ssh -i ~/.ssh/tu_clave -N -L 8765:127.0.0.1:8765 usuario@tu-vps
+ssh -i ~/.ssh/your_key -N -L 8765:127.0.0.1:8765 user@your-vps
 ```
 
-Configurar `.env` para modo WebSocket:
+Then configure `.env`:
 
 ```env
 OPENCLAWD_MODE=ws
 OPENCLAWD_WS_URL=ws://127.0.0.1:8765/ws
-OPENCLAWD_WS_BEARER_TOKEN=tu_token_si_aplica
+OPENCLAWD_WS_BEARER_TOKEN=
 OPENCLAWD_WS_HEADERS={}
 OPENCLAWD_WS_EXTRA_PAYLOAD={}
 OPENCLAWD_WS_REQUEST_TYPE=
@@ -304,15 +290,19 @@ OPENCLAWD_WS_PARTIAL_TYPES=assistant.text.partial,partial,delta,response.chunk
 OPENCLAWD_WS_FINAL_TYPES=assistant.text.final,final,done,response.final
 ```
 
-Reiniciar backend y repetir escenarios C y D.
+Restart the backend and repeat the text-turn and interruption scenarios.
 
-## 10. OpenClawd por HTTP (alternativa)
+### HTTP mode
 
-Si tu instancia expone HTTP/REST:
+If your OpenClawd deployment exposes HTTP:
 
 ```env
 OPENCLAWD_MODE=http
-OPENCLAWD_BASE_URL=https://tu-endpoint
+OPENCLAWD_BASE_URL=https://your-endpoint
 OPENCLAWD_CHAT_ENDPOINT=/api/chat
-OPENCLAWD_API_KEY=tu_api_key
+OPENCLAWD_API_KEY=
 ```
+
+## 9. Scope note
+
+This runbook documents what is already practical in the repository today. It does not assume production-ready hardware adapters or final embedded deployment hardening.
