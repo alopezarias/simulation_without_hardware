@@ -29,6 +29,9 @@ class FakeGateway:
     async def cancel_listen(self, turn_id: str | None) -> None:
         self.calls.append(("cancel_listen", turn_id))
 
+    async def send_audio_chunk(self, turn_id: str, chunk: dict[str, object]) -> None:
+        self.calls.append(("send_audio_chunk", {"turn_id": turn_id, **chunk}))
+
     async def request_agents_version(self) -> None:
         self.calls.append(("request_agents_version", None))
 
@@ -62,6 +65,7 @@ async def test_controller_maps_start_listen_effect_to_gateway() -> None:
     observer = FakeObserver()
     snapshot = DeviceSnapshot(device_id="sim-1", device_state=DeviceState.READY)
     snapshot.connected = True
+    snapshot.session_id = "session-1"
     controller = SimulatorController(snapshot, gateway=gateway, clock=clock, observer=observer)
 
     await controller.handle_input(DeviceInputEvent.PRESS)
@@ -160,3 +164,18 @@ async def test_controller_keeps_local_device_state_when_remote_ui_state_changes(
 
     assert controller.snapshot.device_state == DeviceState.AGENTS
     assert controller.snapshot.remote_ui_state.value == "processing"
+
+
+@pytest.mark.asyncio
+async def test_controller_blocks_listen_until_session_ready() -> None:
+    gateway = FakeGateway()
+    clock = FakeClock()
+    snapshot = DeviceSnapshot(device_id="sim-1", device_state=DeviceState.READY)
+    snapshot.connected = True
+    controller = SimulatorController(snapshot, gateway=gateway, clock=clock)
+
+    result = await controller.handle_input(DeviceInputEvent.PRESS)
+
+    assert result.note == "backend not ready"
+    assert controller.snapshot.device_state == DeviceState.READY
+    assert gateway.calls == []

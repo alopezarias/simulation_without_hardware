@@ -60,6 +60,11 @@ class CliGateway(BackendGateway):
             payload["turn_id"] = turn_id
         await send_json(self._ws, build_message("recording.cancel", **payload))
 
+    async def send_audio_chunk(self, turn_id: str, chunk: dict[str, Any]) -> None:
+        payload = dict(chunk)
+        payload["turn_id"] = turn_id
+        await send_json(self._ws, build_message("audio.chunk", **payload))
+
     async def request_agents_version(self) -> None:
         await send_json(self._ws, build_message("agents.version.request"))
 

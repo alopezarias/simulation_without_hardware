@@ -12,6 +12,7 @@ Primera base funcional del proyecto de dispositivo conversacional, centrada en v
 - `backend/infrastructure/speech/speech_pipeline.py`: pipeline local de voz usado por el adapter de infraestructura.
 - `backend/shared/protocol.py`: utilidades de protocolo y estados compartidos.
 - `simulator/`: proyecto simulador independiente (CLI/UI/QA) para emular hardware.
+- `device_runtime/`: runtime compartido extraido del simulador, con core comun y adapters reutilizables para simulacion/dev y Raspberry Pi.
 - `simulator/entrypoints/cli.py`: simulador CLI.
 - `simulator/entrypoints/ui.py`: simulador con UI grafica (Tkinter) y mini pantalla estilo HAT (LED, red, bateria, texto enviado/recibido).
 - `simulator/qa/smoke_test.py`: prueba end-to-end automatizada.
@@ -30,6 +31,13 @@ Simulator (`simulator/`):
 - `simulator/domain/*`, `simulator/application/*`, `simulator/infrastructure/*`: capas del simulador.
 - `simulator/entrypoints/*`: entradas ejecutables (CLI/UI) que ensamblan esas capas.
 - `simulator/shared/protocol.py`: contrato de mensajes del lado simulador.
+
+Runtime compartido (`device_runtime/`):
+- `device_runtime/application/services/*`: state machine, protocolo, controller, display model y configuracion del runtime.
+- `device_runtime/infrastructure/audio/*`: chunker, adapters `sounddevice` para desarrollo, `null_*` para degradacion y scaffolding ALSA para Raspberry Pi.
+- `device_runtime/infrastructure/input/*`: adapters `keyboard`, `null` y scaffolding `gpio`.
+- `device_runtime/infrastructure/display/*`: preview Tk, `null` y scaffolding `whisplay`.
+- `device_runtime/entrypoints/raspi_main.py`: bootstrap de composicion para runtime Raspberry Pi/degradado.
 
 ## Flujo MVP cubierto
 
@@ -75,7 +83,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
 
-## Tests unitarios (backend + simulador)
+## Tests unitarios (backend + simulador + runtime compartido)
 
 Instalacion:
 
@@ -91,7 +99,30 @@ Ejecucion completa:
 pytest
 ```
 
-Nota: `pytest.ini` ya fuerza `-p no:capture` para evitar un `segfault` del plugin de captura en este entorno.
+Nota: `pytest.ini` ya fuerza `-p no:capture` para evitar un `segfault` del plugin de captura en este entorno e incluye por defecto `backend/tests`, `simulator/tests` y `device_runtime/tests`.
+
+## Runtime Raspberry Pi / adapters compartidos
+
+Bootstrap minimo del runtime comun sin hardware real:
+
+```bash
+source .venv/bin/activate
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
+```
+
+Variables utiles para seleccionar adapters:
+
+```env
+DEVICE_DISPLAY_ADAPTER=null|whisplay
+DEVICE_BUTTON_ADAPTER=null|keyboard|gpio
+DEVICE_AUDIO_IN_ADAPTER=null|sounddevice|alsa
+DEVICE_AUDIO_OUT_ADAPTER=null|sounddevice|alsa
+DEVICE_FAIL_FAST_ON_MISSING_BUTTON=false
+```
+
+Notas:
+- Los adapters Raspberry Pi reales degradan a `null_*` con warnings claros si faltan dependencias del host.
+- El simulador UI ya reutiliza los adapters compartidos `keyboard_button`, `sounddevice_capture` y `sounddevice_playback`.
 
 ## OpenClawd WebSocket
 

@@ -27,6 +27,7 @@ def test_locked_long_press_unlocks() -> None:
 def test_ready_press_starts_listen_when_connected() -> None:
     machine = DeviceStateMachine(turn_id_factory=lambda: "turn-1")
     snapshot = DeviceSnapshot(device_id="sim-1", device_state=DeviceState.READY)
+    snapshot.session_id = "session-1"
 
     result = machine.handle_event(snapshot, DeviceInputEvent.PRESS, connected=True, now=0.0)
 
@@ -42,6 +43,17 @@ def test_ready_press_stays_local_when_disconnected() -> None:
     result = machine.handle_event(snapshot, DeviceInputEvent.PRESS, connected=False, now=0.0)
 
     assert result.snapshot.device_state == DeviceState.READY
+    assert result.effects == []
+
+
+def test_ready_press_stays_local_when_backend_not_ready() -> None:
+    machine = DeviceStateMachine(turn_id_factory=lambda: "turn-1")
+    snapshot = DeviceSnapshot(device_id="sim-1", device_state=DeviceState.READY)
+
+    result = machine.handle_event(snapshot, DeviceInputEvent.PRESS, connected=True, now=0.0)
+
+    assert result.snapshot.device_state == DeviceState.READY
+    assert result.note == "backend not ready"
     assert result.effects == []
 
 

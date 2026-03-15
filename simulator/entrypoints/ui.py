@@ -3,37 +3,39 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import base64
-import copy
 import json
 import os
 import queue
-import threading
 import time
-import textwrap
 import tkinter as tk
 from tkinter import ttk
 from typing import Any
 
-import websockets
 from dotenv import load_dotenv
 
-from simulator.application.ports import BackendGateway, Clock
+from simulator.application.ports import Clock
 from simulator.application.services import SimulatorController
 from simulator.domain.events import DeviceInputEvent, DeviceState
 from simulator.domain.state import UiStateModel
+from device_runtime.application.services import DisplayModelService
+from device_runtime.infrastructure.audio.sounddevice_capture import (
+    query_input_devices,
+    sounddevice_is_available,
+)
+from device_runtime.infrastructure.display.tk_preview_display import TkPreviewDisplay
+from device_runtime.infrastructure.input.keyboard_button import KeyboardButton
+from simulator.entrypoints.ui_runtime import (
+    AudioOutputPlayer,
+    MicAudioStreamer,
+    UiGateway,
+    UiRuntimeSession,
+    WsWorker,
+)
 from simulator.shared.protocol import UiState, build_message
 
-try:
-    import sounddevice as sd
-
-    SOUNDDEVICE_AVAILABLE = True
-except Exception:
-    sd = None
-    SOUNDDEVICE_AVAILABLE = False
-
 load_dotenv()
+
+SOUNDDEVICE_AVAILABLE = sounddevice_is_available()
 
 MIC_SAMPLE_RATE = 16000
 MIC_CHANNELS = 1
@@ -84,322 +86,13 @@ class SystemClock(Clock):
         return time.monotonic()
 
 
-class WsWorker(threading.Thread):
-    """Background websocket client that exchanges JSON messages with backend."""
-
-    def __init__(
-        self,
-        ws_url: str,
-        device_id: str,
-        auth_token: str,
-        initial_agent: str,
-        inbox: queue.Queue[dict[str, Any]],
-    ) -> None:
-        super().__init__(daemon=True)
-        self.ws_url = ws_url
-        self.device_id = device_id
-        self.auth_token = auth_token
-        self.initial_agent = initial_agent
-        self.inbox = inbox
-        self.outbox: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.stop_event = threading.Event()
-
-    def send(self, message: dict[str, Any]) -> None:
-        self.outbox.put(message)
-
-    def stop(self) -> None:
-        self.stop_event.set()
-
-    async def _send_loop(self, ws: websockets.ClientConnection) -> None:
-        while not self.stop_event.is_set():
-            try:
-                message = self.outbox.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.05)
-                continue
-            await ws.send(json.dumps(message))
-
-    async def _recv_loop(self, ws: websockets.ClientConnection) -> None:
-        async for raw in ws:
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            self.inbox.put(message)
-
-    async def _run(self) -> None:
-        reconnect_delay = 1.0
-        while not self.stop_event.is_set():
-            try:
-                async with websockets.connect(self.ws_url) as ws:
-                    self.inbox.put({"type": "_connection", "status": "connected"})
-                    hello = build_message(
-                        "device.hello",
-                        device_id=self.device_id,
-                        firmware_version="0.3.0",
-                        simulated=True,
-                        capabilities=["screen", "leds", "button", "audio_in", "audio_out"],
-                        active_agent=self.initial_agent,
-                    )
-                    if self.auth_token:
-                        hello["auth_token"] = self.auth_token
-                    await ws.send(json.dumps(hello))
-
-                    sender = asyncio.create_task(self._send_loop(ws))
-                    receiver = asyncio.create_task(self._recv_loop(ws))
-                    done, pending = await asyncio.wait(
-                        {sender, receiver},
-                        return_when=asyncio.FIRST_EXCEPTION,
-                    )
-                    for task in pending:
-                        task.cancel()
-                    for task in done:
-                        task.result()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                self.inbox.put(
-                    {
-                        "type": "_connection",
-                        "status": "disconnected",
-                        "detail": str(exc),
-                    }
-                )
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 1.8, 6.0)
-            else:
-                reconnect_delay = 1.0
-
-        self.inbox.put({"type": "_connection", "status": "stopped"})
-
-    def run(self) -> None:
-        asyncio.run(self._run())
-
-
-class MicAudioStreamer:
-    """Capture microphone audio and expose fixed-size PCM chunks."""
-
-    def __init__(
-        self,
-        sample_rate: int = MIC_SAMPLE_RATE,
-        channels: int = MIC_CHANNELS,
-        chunk_ms: int = MIC_CHUNK_MS,
-        max_queue_chunks: int = 80,
-    ) -> None:
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.chunk_ms = chunk_ms
-        self.frames_per_chunk = max(1, int(sample_rate * chunk_ms / 1000))
-        self.max_queue_chunks = max(4, max_queue_chunks)
-        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self.max_queue_chunks)
-        self._stream: Any | None = None
-        self._started_monotonic: float = 0.0
-        self._seq: int = 0
-        self._bytes_sent: int = 0
-        self.device_index: int | None = None
-        self._dropped_chunks: int = 0
-
-    @property
-    def active(self) -> bool:
-        return self._stream is not None
-
-    @property
-    def bytes_sent(self) -> int:
-        return self._bytes_sent
-
-    @property
-    def dropped_chunks(self) -> int:
-        return self._dropped_chunks
-
-    def start(self) -> None:
-        if not SOUNDDEVICE_AVAILABLE:
-            raise RuntimeError("sounddevice is not available. Install dependencies from requirements.txt.")
-        assert sd is not None
-        if self.active:
-            return
-
-        self._queue = queue.Queue(maxsize=self.max_queue_chunks)
-        self._seq = 0
-        self._bytes_sent = 0
-        self._dropped_chunks = 0
-        self._started_monotonic = time.monotonic()
-
-        def _callback(indata: Any, frames: int, _time: Any, status: Any) -> None:
-            if status or frames <= 0:
-                pass
-            pcm_bytes = bytes(indata.tobytes())
-            if not pcm_bytes:
-                return
-            try:
-                self._queue.put_nowait(pcm_bytes)
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    self._queue.put_nowait(pcm_bytes)
-                except queue.Full:
-                    pass
-                self._dropped_chunks += 1
-
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="int16",
-            blocksize=self.frames_per_chunk,
-            device=self.device_index,
-            callback=_callback,
-        )
-        self._stream.start()
-
-    def stop(self) -> None:
-        if not self.active:
-            return
-        assert self._stream is not None
-        try:
-            self._stream.stop()
-        finally:
-            self._stream.close()
-            self._stream = None
-
-    def pop_chunks(self, max_chunks: int | None = None) -> list[dict[str, Any]]:
-        chunks: list[dict[str, Any]] = []
-        while max_chunks is None or len(chunks) < max_chunks:
-            try:
-                pcm_bytes = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            duration_ms = int((len(pcm_bytes) / (2 * self.channels)) * 1000 / self.sample_rate)
-            if duration_ms <= 0:
-                duration_ms = self.chunk_ms
-            chunks.append(
-                {
-                    "seq": self._seq,
-                    "timestamp_ms": int((time.monotonic() - self._started_monotonic) * 1000),
-                    "duration_ms": duration_ms,
-                    "payload": base64.b64encode(pcm_bytes).decode("ascii"),
-                    "size_bytes": len(pcm_bytes),
-                }
-            )
-            self._seq += 1
-            self._bytes_sent += len(pcm_bytes)
-        return chunks
-
-
-class AudioOutputPlayer:
-    """Play PCM16 audio chunks arriving from backend."""
-
-    def __init__(self) -> None:
-        self.sample_rate = MIC_SAMPLE_RATE
-        self.channels = MIC_CHANNELS
-        self._stream: Any | None = None
-        self._buffer = bytearray()
-        self._lock = threading.Lock()
-        self._max_buffer_bytes = self.sample_rate * self.channels * 2 * 8
-
-    @property
-    def active(self) -> bool:
-        return self._stream is not None
-
-    @property
-    def buffered_bytes(self) -> int:
-        with self._lock:
-            return len(self._buffer)
-
-    def start(self, sample_rate: int, channels: int) -> None:
-        if not SOUNDDEVICE_AVAILABLE:
-            return
-        assert sd is not None
-        self.stop(clear_buffer=True)
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self._max_buffer_bytes = max(2048, self.sample_rate * self.channels * 2 * 8)
-
-        def _callback(outdata: Any, _frames: int, _time: Any, status: Any) -> None:
-            if status:
-                pass
-            need = len(outdata)
-            if need <= 0:
-                return
-            with self._lock:
-                outdata[:] = b"\x00" * need
-                take = min(need, len(self._buffer))
-                if take > 0:
-                    outdata[:take] = self._buffer[:take]
-                    del self._buffer[:take]
-
-        self._stream = sd.RawOutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="int16",
-            callback=_callback,
-        )
-        self._stream.start()
-
-    def push(self, pcm_bytes: bytes) -> None:
-        if not pcm_bytes or not self.active:
-            return
-        with self._lock:
-            self._buffer.extend(pcm_bytes)
-            overflow = len(self._buffer) - self._max_buffer_bytes
-            if overflow > 0:
-                del self._buffer[:overflow]
-
-    def stop(self, clear_buffer: bool = True) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-            finally:
-                self._stream.close()
-                self._stream = None
-        if clear_buffer:
-            with self._lock:
-                self._buffer.clear()
-
-
-class UiGateway(BackendGateway):
-    """Backend gateway that writes transport messages through the worker queue."""
-
-    def __init__(self, sender: Any) -> None:
-        self._sender = sender
-
-    async def start_listen(self, turn_id: str) -> None:
-        self._sender(
-            build_message(
-                "recording.start",
-                turn_id=turn_id,
-                codec="pcm16",
-                sample_rate=MIC_SAMPLE_RATE,
-                channels=MIC_CHANNELS,
-            )
-        )
-
-    async def stop_listen(self, turn_id: str) -> None:
-        self._sender(build_message("recording.stop", turn_id=turn_id))
-
-    async def cancel_listen(self, turn_id: str | None) -> None:
-        payload: dict[str, Any] = {}
-        if turn_id:
-            payload["turn_id"] = turn_id
-        self._sender(build_message("recording.cancel", **payload))
-
-    async def request_agents_version(self) -> None:
-        self._sender(build_message("agents.version.request"))
-
-    async def request_agents_list(self) -> None:
-        self._sender(build_message("agents.list.request"))
-
-    async def confirm_agent(self, agent_id: str) -> None:
-        self._sender(build_message("agent.select", agent_id=agent_id))
-
-
 class SimulatorUi:
     def __init__(self, root: tk.Tk, ws_url: str, device_id: str, auth_token: str) -> None:
         self.root = root
         self.root.title("Simulador de Dispositivo Conversacional")
         self.root.geometry("1460x820")
         self.root.minsize(1280, 720)
+        self._button_labels = DEVICE_BUTTONS
 
         initial_state = UiStateModel(device_id=device_id)
         self.inbox: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -412,7 +105,7 @@ class SimulatorUi:
         )
         self.controller = SimulatorController(
             initial_state,
-            gateway=UiGateway(self._send_worker_message),
+            gateway=UiGateway(self._send_worker_message, sample_rate=MIC_SAMPLE_RATE, channels=MIC_CHANNELS),
             clock=SystemClock(),
         )
 
@@ -440,11 +133,22 @@ class SimulatorUi:
         self._audio_player = AudioOutputPlayer()
         self._audio_end_pending = False
         self._mic_streamer = MicAudioStreamer()
+        self._keyboard_button = KeyboardButton(self.root)
+        self._display_model_service = DisplayModelService()
+        self._preview_display: TkPreviewDisplay | None = None
         self._mic_input_devices: list[tuple[int, str]] = []
         self._turn_audio_chunks_sent = 0
         self._turn_audio_bytes_sent = 0
         self._turn_audio_chunks_rx = 0
         self._turn_audio_bytes_rx = 0
+        self._runtime_session = UiRuntimeSession(
+            self,
+            sounddevice_available=SOUNDDEVICE_AVAILABLE,
+            sample_rate=MIC_SAMPLE_RATE,
+            channels=MIC_CHANNELS,
+            chunk_ms=MIC_CHUNK_MS,
+            max_chunks_per_flush=MAX_CHUNKS_PER_FLUSH,
+        )
 
         self._build_layout()
         self._bind_keys()
@@ -607,8 +311,8 @@ class SimulatorUi:
         self._render()
 
     def _bind_keys(self) -> None:
-        self.root.bind("<space>", lambda _event: self._dispatch(DeviceInputEvent.PRESS) or "break")
-        self.root.bind("<Escape>", lambda _event: self._dispatch(DeviceInputEvent.LONG_PRESS) or "break")
+        self._keyboard_button.start(lambda event_name: self._dispatch(DeviceInputEvent(event_name)))
+        self._keyboard_button.bind_default_keys(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def refresh_mic_devices(self) -> None:
@@ -617,24 +321,15 @@ class SimulatorUi:
             self.mic_device_combo.configure(values=[])
             self.mic_device_var.set("")
             return
-        assert sd is not None
-
         try:
-            devices = sd.query_devices()
+            entries = query_input_devices()
         except Exception as exc:
             self.mic_error_var.set(f"query_devices error: {exc}")
             self.mic_device_combo.configure(values=[])
             self.mic_device_var.set("")
             return
 
-        entries: list[tuple[int, str]] = []
-        labels: list[str] = []
-        for index, dev in enumerate(devices):
-            if int(dev.get("max_input_channels", 0)) <= 0:
-                continue
-            label = f"{index}: {str(dev.get('name', f'device-{index}')).strip()}"
-            entries.append((index, label))
-            labels.append(label)
+        labels = [label for _, label in entries]
 
         self._mic_input_devices = entries
         self.mic_device_combo.configure(values=labels)
@@ -700,46 +395,17 @@ class SimulatorUi:
         self.wire_text.see(tk.END)
         self.wire_text.configure(state=tk.DISABLED)
 
-    def _wrap_preview_text(self, text: str, width: int, lines: int) -> str:
-        compact = " ".join(text.split()).strip()
-        if not compact:
-            return "-"
-        wrapped = textwrap.wrap(compact, width=width, break_long_words=True, break_on_hyphens=False)
-        if len(wrapped) > lines:
-            wrapped = wrapped[:lines]
-            wrapped[-1] = wrapped[-1][: max(0, width - 3)] + "..."
-        return "\n".join(wrapped)
-
     def _draw_hardware_preview(self) -> None:
         if not hasattr(self, "hat_canvas"):
             return
-        canvas = self.hat_canvas
-        canvas.delete("all")
-        mode = self.preview_mode_var.get().strip().lower()
-        shell_fill = "#f8fafc" if mode == "cased" else "#111827"
-        shell_outline = "#cbd5e1" if mode == "cased" else "#334155"
-        screen_fill = "#020617"
-        canvas.create_rectangle(0, 0, 360, 520, fill="#0f172a", outline="")
-        canvas.create_rectangle(58, 24, 302, 496, fill=shell_fill, outline=shell_outline, width=2)
-        if mode == "cased":
-            canvas.create_rectangle(122, 2, 238, 34, fill="#d97706", outline="#b45309", width=2)
-        led_color = DEVICE_STATE_COLORS.get(self.state.device_state, "#ef4444")
-        canvas.create_oval(168, 42, 192, 66, fill=led_color, outline="#1d4ed8")
-        canvas.create_rectangle(78, 88, 282, 392, fill=screen_fill, outline="#1e293b", width=2)
-        canvas.create_text(92, 104, anchor="nw", text=self.state.device_state.value, fill="#e2e8f0", font=("Helvetica", 15, "bold"))
-        canvas.create_text(268, 104, anchor="ne", text=self.state.remote_ui_state.value, fill="#93c5fd", font=("Helvetica", 10, "bold"))
-        canvas.create_text(92, 132, anchor="nw", text=f"agent: {self.state.active_agent}", fill="#94a3b8", font=("Helvetica", 9))
-        canvas.create_text(92, 148, anchor="nw", text=f"focus: {self._focus_label()}", fill="#94a3b8", font=("Helvetica", 9))
-        mic_live = self._mic_streamer.active and self.state.device_state == DeviceState.LISTEN
-        canvas.create_text(92, 174, anchor="nw", text="mic", fill="#f8fafc", font=("Helvetica", 10, "bold"))
-        canvas.create_oval(128, 175, 140, 187, fill="#ef4444" if mic_live else "#475569", outline="")
-        canvas.create_text(146, 174, anchor="nw", text="REC" if mic_live else "OFF", fill="#fca5a5" if mic_live else "#94a3b8", font=("Helvetica", 9, "bold"))
-        canvas.create_text(92, 212, anchor="nw", text="YOU", fill="#e2e8f0", font=("Helvetica", 9, "bold"))
-        canvas.create_text(92, 230, anchor="nw", text=self._wrap_preview_text(self.state.transcript or "Tap/Press to speak", 22, 5), fill="#e2e8f0", font=("Helvetica", 10), width=166)
-        canvas.create_text(92, 306, anchor="nw", text="AGENT", fill="#86efac", font=("Helvetica", 9, "bold"))
-        canvas.create_text(92, 324, anchor="nw", text=self._wrap_preview_text(self.state.assistant_text or "Waiting for backend response", 22, 5), fill="#86efac", font=("Helvetica", 10), width=166)
-        canvas.create_text(180, 430, anchor="center", text=f"TX {self._turn_audio_chunks_sent} / RX {self._turn_audio_chunks_rx}", fill="#cbd5e1", font=("Helvetica", 10, "bold"))
-        canvas.create_text(180, 452, anchor="center", text=self.note_var.get(), fill="#f8fafc", font=("Helvetica", 9), width=220)
+        if self._preview_display is None:
+            self._preview_display = TkPreviewDisplay(self.hat_canvas, mode_provider=self.preview_mode_var.get)
+        model = self._display_model_service.build(self.state)
+        model.mic_live = self._mic_streamer.active and self.state.device_state == DeviceState.LISTEN
+        preview_display = self._preview_display
+        assert preview_display is not None
+        preview_display.show_diagnostic(self.note_var.get())
+        preview_display.render(model)
 
     def _append_log(self, message: str) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {message}\n"
@@ -753,39 +419,10 @@ class SimulatorUi:
         self.log_text.configure(state=tk.DISABLED)
 
     def _send_worker_message(self, message: dict[str, Any]) -> None:
-        if not self.state.connected:
-            self.note_var.set("Sin conexion al backend")
-            self._append_log(f"TX blocked {message.get('type', '-')}")
-            self._append_wire("TX-BLOCKED", message)
-            return
-        self.worker.send(message)
-        self._append_log(f"TX {message.get('type', '-')}")
-        self._append_wire("TX", message)
+        self._runtime_session.send_worker_message(message)
 
     def _dispatch(self, event: DeviceInputEvent) -> None:
-        previous_state = self.state.device_state
-        result = asyncio.run(self.controller.handle_input(event))
-        self._reconcile_runtime_after_transition(previous_state=previous_state)
-        label = DEVICE_BUTTONS[event]
-        self.note_var.set(result.note or label)
-        self._append_log(f"BTN {label} -> {result.note or self.state.device_state.value}")
-        self._render()
-
-    def _reconcile_runtime_after_transition(self, *, previous_state: DeviceState) -> None:
-        if previous_state == DeviceState.LISTEN and self.state.device_state != DeviceState.LISTEN:
-            self._flush_mic_chunks()
-            self._stop_mic_capture()
-        if previous_state != DeviceState.LISTEN and self.state.device_state == DeviceState.LISTEN:
-            self._turn_audio_chunks_sent = 0
-            self._turn_audio_bytes_sent = 0
-            self._turn_audio_chunks_rx = 0
-            self._turn_audio_bytes_rx = 0
-            self._stop_audio_playback(clear_buffer=True)
-            if SOUNDDEVICE_AVAILABLE:
-                self._start_mic_capture(auto=True)
-        if self.state.device_state != DeviceState.LISTEN and self._mic_streamer.active:
-            self._flush_mic_chunks()
-            self._stop_mic_capture()
+        self._runtime_session.dispatch(event)
 
     def _focus_label(self) -> str:
         if self.state.device_state == DeviceState.MENU:
@@ -847,206 +484,41 @@ class SimulatorUi:
         self._render()
 
     def on_open_mic(self) -> None:
-        if not SOUNDDEVICE_AVAILABLE:
-            self.note_var.set("Mic no disponible: instala sounddevice y portaudio")
-            self.mic_error_var.set("sounddevice no instalado")
-            return
-        if self.state.device_state != DeviceState.LISTEN:
-            self.note_var.set("Entra en LISTEN con Press antes de abrir el micro")
-            return
-        if self._mic_streamer.active:
-            self.note_var.set("Microfono ya abierto")
-            return
-        self._start_mic_capture(auto=False)
-        if self._mic_streamer.active:
-            self.note_var.set("Microfono abierto")
-        self._render()
+        self._runtime_session.open_mic()
 
     def on_close_mic(self) -> None:
-        if not self._mic_streamer.active:
-            self.note_var.set("Microfono ya esta cerrado")
-            return
-        self._flush_mic_chunks()
-        self._stop_mic_capture()
-        self.note_var.set("Microfono cerrado")
-        self._render()
+        self._runtime_session.close_mic()
 
     def _stop_mic_capture(self) -> None:
-        if not self._mic_streamer.active:
-            return
-        self._mic_streamer.stop()
-        self.mic_error_var.set("-")
-        self._append_log("AUDIO mic capture stopped")
-        self._append_wire(
-            "SYS",
-            {
-                "type": "audio.capture.stopped",
-                "bytes_sent": self._mic_streamer.bytes_sent,
-                "dropped_chunks": self._mic_streamer.dropped_chunks,
-            },
-        )
+        self._runtime_session._stop_mic_capture()
 
     def _start_mic_capture(self, *, auto: bool) -> None:
-        if self._mic_streamer.active:
-            return
-        if SOUNDDEVICE_AVAILABLE and not self._mic_input_devices:
-            self.refresh_mic_devices()
-        try:
-            self._mic_streamer.start()
-            self.mic_error_var.set("-")
-            self._append_log("AUDIO mic capture started")
-            self._append_wire(
-                "SYS",
-                {
-                    "type": "audio.capture.started",
-                    "sample_rate": MIC_SAMPLE_RATE,
-                    "channels": MIC_CHANNELS,
-                    "chunk_ms": MIC_CHUNK_MS,
-                    "device_index": self._mic_streamer.device_index,
-                    "auto": auto,
-                },
-            )
-            if auto:
-                self.note_var.set("LISTEN activo: microfono abierto")
-        except Exception as exc:
-            self.mic_error_var.set(str(exc))
-            self.note_var.set(f"No se pudo iniciar microfono: {exc}")
-            self._append_log(f"AUDIO error: {exc}")
-            self._append_wire("SYS", {"type": "audio.capture.error", "detail": str(exc), "auto": auto})
+        self._runtime_session._start_mic_capture(auto=auto)
 
     def _flush_mic_chunks(self) -> None:
-        if not self._mic_streamer.active or self.state.device_state != DeviceState.LISTEN:
-            return
-        if not self.state.turn_id:
-            return
-        for chunk in self._mic_streamer.pop_chunks(max_chunks=MAX_CHUNKS_PER_FLUSH):
-            self._turn_audio_chunks_sent += 1
-            self._turn_audio_bytes_sent += int(chunk["size_bytes"])
-            self._send_worker_message(
-                build_message(
-                    "audio.chunk",
-                    turn_id=self.state.turn_id,
-                    seq=chunk["seq"],
-                    timestamp_ms=chunk["timestamp_ms"],
-                    duration_ms=chunk["duration_ms"],
-                    payload=chunk["payload"],
-                    codec="pcm16",
-                    sample_rate=MIC_SAMPLE_RATE,
-                    channels=MIC_CHANNELS,
-                    size_bytes=chunk["size_bytes"],
-                )
-            )
+        self._runtime_session._flush_mic_chunks()
 
     def _stop_audio_playback(self, clear_buffer: bool = True) -> None:
-        self._audio_player.stop(clear_buffer=clear_buffer)
-        self._audio_end_pending = False
+        self._runtime_session._stop_audio_playback(clear_buffer=clear_buffer)
 
     def _maybe_finish_audio_playback(self) -> None:
-        if not self._audio_end_pending:
-            return
-        if not self._audio_player.active:
-            self._audio_end_pending = False
-            return
-        if self._audio_player.buffered_bytes <= 0:
-            self._audio_player.stop(clear_buffer=True)
-            self._audio_end_pending = False
+        self._runtime_session._maybe_finish_audio_playback()
 
     def _handle_connection_event(self, message: dict[str, Any]) -> None:
-        snapshot = copy.deepcopy(self.state)
-        status = str(message.get("status", ""))
-        if status == "connected":
-            snapshot.connected = True
-            self.note_var.set("Conectado a backend")
-        elif status in {"disconnected", "stopped"}:
-            snapshot.connected = False
-            self._flush_mic_chunks()
-            self._stop_mic_capture()
-            self._stop_audio_playback(clear_buffer=True)
-            detail = str(message.get("detail", "")).strip()
-            if status == "disconnected":
-                suffix = f" ({detail})" if detail else ""
-                self.note_var.set(f"Desconectado, reintentando{suffix}")
-            else:
-                self.note_var.set("Conexion detenida")
-        self.controller.replace_snapshot(snapshot)
-        self._append_log(f"SYS {status}")
-        self._append_wire("SYS", message)
-        self._render()
+        self._runtime_session._handle_connection_event(message)
 
     def _handle_audio_message(self, message: dict[str, Any]) -> None:
-        message_type = str(message.get("type", ""))
-        if message_type == "assistant.audio.start":
-            if SOUNDDEVICE_AVAILABLE:
-                sample_rate = int(message.get("sample_rate", MIC_SAMPLE_RATE) or MIC_SAMPLE_RATE)
-                channels = int(message.get("channels", MIC_CHANNELS) or MIC_CHANNELS)
-                try:
-                    self._audio_player.start(sample_rate=sample_rate, channels=channels)
-                    self._audio_end_pending = False
-                except Exception as exc:
-                    self._stop_audio_playback(clear_buffer=True)
-                    self.note_var.set(f"No se pudo abrir salida de audio: {exc}")
-            else:
-                self.note_var.set("Audio de salida no disponible")
-            return
-
-        if message_type == "assistant.audio.chunk":
-            payload = message.get("payload")
-            if not isinstance(payload, str) or not payload:
-                return
-            if SOUNDDEVICE_AVAILABLE and not self._audio_player.active:
-                try:
-                    self._audio_player.start(sample_rate=MIC_SAMPLE_RATE, channels=MIC_CHANNELS)
-                except Exception:
-                    pass
-            try:
-                pcm_bytes = base64.b64decode(payload, validate=True)
-            except Exception:
-                pcm_bytes = b""
-            if pcm_bytes:
-                self._audio_player.push(pcm_bytes)
-                self._turn_audio_chunks_rx += 1
-                self._turn_audio_bytes_rx += len(pcm_bytes)
-            return
-
-        if message_type == "assistant.audio.end":
-            self._audio_end_pending = True
+        self._runtime_session._handle_audio_message(message)
 
     def _handle_backend_message(self, message: dict[str, Any]) -> None:
-        message_type = str(message.get("type", ""))
-        previous_state = self.state.device_state
-        update = asyncio.run(self.controller.handle_backend_message(message))
-        if self.state.device_state != DeviceState.LISTEN:
-            self._flush_mic_chunks()
-            self._stop_mic_capture()
-        self._handle_audio_message(message)
-        if update.note:
-            self.note_var.set(update.note)
-        self._append_log(f"RX {message_type}")
-        self._append_wire("RX", message)
-        if previous_state != self.state.device_state:
-            self._append_log(f"STATE {previous_state.value} -> {self.state.device_state.value}")
-        self._render()
+        self._runtime_session._handle_backend_message(message)
 
     def _poll_inbox(self) -> None:
-        for _ in range(80):
-            try:
-                message = self.inbox.get_nowait()
-            except queue.Empty:
-                break
-            if message.get("type") == "_connection":
-                self._handle_connection_event(message)
-            else:
-                self._handle_backend_message(message)
-        self._flush_mic_chunks()
-        self._maybe_finish_audio_playback()
-        self._render()
+        self._runtime_session.poll_inbox()
         self.root.after(120, self._poll_inbox)
 
     def on_close(self) -> None:
-        self._flush_mic_chunks()
-        self._stop_mic_capture()
-        self._stop_audio_playback(clear_buffer=True)
-        self.worker.stop()
+        self._runtime_session.shutdown()
         self.root.after(150, self.root.destroy)
 
 

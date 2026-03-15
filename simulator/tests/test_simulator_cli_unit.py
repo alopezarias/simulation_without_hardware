@@ -62,6 +62,7 @@ async def test_tap_from_ready_starts_recording(monkeypatch: pytest.MonkeyPatch) 
     controller = make_controller(ws)
     controller.snapshot.connected = True
     controller.snapshot.device_state = DeviceState.READY
+    controller.snapshot.session_id = "session-1"
     monkeypatch.setattr(simulator, "render_screen", Mock())
 
     await simulator.tap(controller)
@@ -101,6 +102,22 @@ async def test_send_debug_text_unlock_guard(monkeypatch: pytest.MonkeyPatch) -> 
 
     await simulator.send_debug_text(ws, controller, "hola")
 
+    assert ws.sent == []
+    render_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tap_requires_session_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    ws = FakeWs()
+    controller = make_controller(ws)
+    controller.snapshot.connected = True
+    controller.snapshot.device_state = DeviceState.READY
+    render_mock = Mock()
+    monkeypatch.setattr(simulator, "render_screen", render_mock)
+
+    await simulator.tap(controller)
+
+    assert controller.snapshot.device_state == DeviceState.READY
     assert ws.sent == []
     render_mock.assert_called_once()
 

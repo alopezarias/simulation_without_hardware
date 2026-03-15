@@ -111,6 +111,29 @@ Controles UI:
 - Selector `Vista`: `cased` (carcasa) o `bare` (sin carcasa).
 - Botones de simulacion: `Turno`, `Interrupcion`, `Cancelacion`.
 
+## 4.1 Probar bootstrap del runtime comun sin hardware
+
+```bash
+cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
+source .venv/bin/activate
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
+```
+
+Variantes utiles:
+
+```bash
+# development/shared adapters
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_BUTTON_ADAPTER=keyboard DEVICE_AUDIO_IN_ADAPTER=sounddevice DEVICE_AUDIO_OUT_ADAPTER=sounddevice python -m device_runtime.entrypoints.raspi_main
+
+# scaffolding Raspberry Pi con degradacion segura si faltan libs
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_DISPLAY_ADAPTER=whisplay DEVICE_BUTTON_ADAPTER=gpio DEVICE_AUDIO_IN_ADAPTER=alsa DEVICE_AUDIO_OUT_ADAPTER=alsa python -m device_runtime.entrypoints.raspi_main
+```
+
+Resultado esperado:
+- El proceso importa correctamente aunque falten librerias/vendor de Raspberry Pi.
+- El snapshot inicial queda con warnings tipo `screen unavailable`, `button unavailable` o `audio_* unavailable` cuando corresponde.
+- El simulador actual sigue funcionando por separado con `python -m simulator.entrypoints.ui`.
+
 ## 5. Escenarios funcionales para probar
 
 ### Escenario A: handshake de sesion
@@ -202,6 +225,14 @@ Resultado esperado:
 
 ```text
 SMOKE TEST PASSED
+```
+
+Smoke local del runtime comun y adapters compartidos:
+
+```bash
+cd /Users/user/Documents/projects/ai/ia_device/simulation_without_hardware
+source .venv/bin/activate
+pytest device_runtime/tests/test_runtime_foundation.py device_runtime/tests/test_runtime_infrastructure.py device_runtime/tests/test_runtime_adapters.py simulator/tests/test_simulator_ui_unit.py simulator/tests/test_simulator_cli_unit.py
 ```
 
 ## 7. Ejecutar simulaciones automatizadas (escenarios)

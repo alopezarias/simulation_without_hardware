@@ -58,6 +58,9 @@ class FakeGateway(BackendGateway):
     async def cancel_listen(self, turn_id: str | None) -> None:
         self.sent.append({"type": "recording.cancel", "turn_id": turn_id})
 
+    async def send_audio_chunk(self, turn_id: str, chunk: dict[str, Any]) -> None:
+        self.sent.append({"type": "audio.chunk", "turn_id": turn_id, **chunk})
+
     async def request_agents_version(self) -> None:
         self.sent.append({"type": "agents.version.request"})
 
@@ -121,6 +124,11 @@ class MicStub:
         self.dropped_chunks = 0
         self.started = False
         self.stopped = False
+        self.last_read_chunks: list[dict[str, Any]] = []
+
+    @property
+    def available(self) -> bool:
+        return self.active
 
     def start(self) -> None:
         self.started = True
@@ -138,6 +146,10 @@ class MicStub:
         result = self._chunks[:max_chunks]
         self._chunks = self._chunks[max_chunks:]
         return result
+
+    def read_chunks(self, max_chunks: int) -> list[dict[str, Any]]:
+        self.last_read_chunks = self.pop_chunks(max_chunks)
+        return list(self.last_read_chunks)
 
 
 class FakeLayoutWidget:
@@ -266,6 +278,14 @@ def ui_stub() -> simulator_ui.SimulatorUi:
     ui._append_wire = Mock()
     ui._draw_hardware_preview = Mock()
     ui._render = simulator_ui.SimulatorUi._render.__get__(ui, simulator_ui.SimulatorUi)
+    ui._runtime_session = simulator_ui.UiRuntimeSession(
+        ui,
+        sounddevice_available=simulator_ui.SOUNDDEVICE_AVAILABLE,
+        sample_rate=simulator_ui.MIC_SAMPLE_RATE,
+        channels=simulator_ui.MIC_CHANNELS,
+        chunk_ms=simulator_ui.MIC_CHUNK_MS,
+        max_chunks_per_flush=simulator_ui.MAX_CHUNKS_PER_FLUSH,
+    )
     return ui
 
 
@@ -422,6 +442,7 @@ def test_render_tracks_local_and_remote_state_boundary(
 def test_dispatch_uses_controller_and_waits_for_agent_ack(ui_stub: simulator_ui.SimulatorUi) -> None:
     ui_stub.state.connected = True
     ui_stub.state.device_state = DeviceState.READY
+    ui_stub.state.session_id = "session-1"
     ui_stub.state.agents = ["assistant-general", "assistant-tech"]
     ui_stub.state.set_agent("assistant-general")
 
@@ -449,6 +470,7 @@ def test_dispatch_auto_opens_mic_when_entering_listen(
     monkeypatch.setattr(simulator_ui, "SOUNDDEVICE_AVAILABLE", True)
     ui_stub.state.connected = True
     ui_stub.state.device_state = DeviceState.READY
+    ui_stub.state.session_id = "session-1"
 
     ui_stub._dispatch(DeviceInputEvent.PRESS)
 
@@ -478,6 +500,7 @@ def test_handle_connection_event_updates_connected_flag(ui_stub: simulator_ui.Si
 def test_on_send_text_enters_listen_via_controller_then_sends_text(ui_stub: simulator_ui.SimulatorUi) -> None:
     ui_stub.state.connected = True
     ui_stub.state.device_state = DeviceState.READY
+    ui_stub.state.session_id = "session-1"
     ui_stub.text_entry_var.set("hola")
     sent_messages: list[dict[str, Any]] = []
     ui_stub._send_worker_message = Mock(side_effect=sent_messages.append)
@@ -501,7 +524,10 @@ def test_on_open_mic_requires_local_listen(ui_stub: simulator_ui.SimulatorUi, mo
 def test_flush_mic_chunks_sends_audio_only_in_local_listen(ui_stub: simulator_ui.SimulatorUi) -> None:
     ui_stub.state.connected = True
     ui_stub.state.device_state = DeviceState.LISTEN
+    ui_stub.state.session_id = "session-1"
     ui_stub.state.turn_id = "turn-1"
+    gateway = FakeGateway()
+    ui_stub.controller = SimulatorController(ui_stub.state, gateway=gateway, clock=FakeClock())
     ui_stub._mic_streamer = MicStub(
         active=True,
         chunks=[
@@ -514,14 +540,12 @@ def test_flush_mic_chunks_sends_audio_only_in_local_listen(ui_stub: simulator_ui
             }
         ],
     )
-    sent_messages: list[dict[str, Any]] = []
-    ui_stub._send_worker_message = Mock(side_effect=sent_messages.append)
 
     ui_stub._flush_mic_chunks()
 
     assert ui_stub._turn_audio_chunks_sent == 1
-    assert sent_messages[-1]["type"] == "audio.chunk"
-    assert sent_messages[-1]["turn_id"] == "turn-1"
+    assert gateway.sent[-1]["type"] == "audio.chunk"
+    assert gateway.sent[-1]["turn_id"] == "turn-1"
 
 
 def test_handle_audio_messages_update_counters(ui_stub: simulator_ui.SimulatorUi, monkeypatch: pytest.MonkeyPatch) -> None:
