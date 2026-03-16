@@ -13,8 +13,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.shared.protocol import build_message
-from device_runtime.application.services import DiagnosticsService, DisplayModelService
+from device_runtime.application.ports import PowerStatus
+from device_runtime.application.services import DiagnosticsService, DisplayModelService, ExperienceService, RgbPolicyService
 from device_runtime.domain.capabilities import CapabilityState, CapabilityStatus, DeviceCapabilities
 from device_runtime.domain.events import DeviceState
 from device_runtime.domain.state import DeviceSnapshot
@@ -24,6 +24,9 @@ from device_runtime.infrastructure.display.null_display import NullDisplay
 from device_runtime.infrastructure.input.null_button import NullButton
 from device_runtime.infrastructure.diagnostics.null_diagnostics import NullDiagnostics
 from device_runtime.infrastructure.config.env_loader import load_runtime_config
+from device_runtime.infrastructure.power.pisugar_status import NullPowerStatus
+from device_runtime.infrastructure.rgb.null_rgb import NullRgb
+from device_runtime.protocol import UiState, build_message
 
 
 def test_runtime_config_loads_minimal_environment() -> None:
@@ -32,6 +35,80 @@ def test_runtime_config_loads_minimal_environment() -> None:
     assert config.device_id == "raspi-1"
     assert config.ws_url == "ws://localhost/ws"
     assert config.transport_adapter == "websocket"
+
+
+def test_runtime_config_accepts_vendor_driver_path_and_backlight() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_WHISPLAY_DRIVER_PATH": "~/Whisplay/Driver",
+            "DEVICE_WHISPLAY_BACKLIGHT": "60",
+        }
+    )
+
+    assert config.whisplay_driver_path == "~/Whisplay/Driver"
+    assert config.whisplay_backlight == 60
+
+
+def test_runtime_config_implicitly_enables_whisplay_bundle_when_display_uses_vendor_adapter() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_DISPLAY_ADAPTER": "whisplay",
+        }
+    )
+
+    assert config.resolved_hardware_profile == "whisplay"
+    assert config.button_adapter == "whisplay"
+    assert config.rgb_adapter == "hardware"
+    assert config.whisplay_bundle_active is True
+
+
+def test_runtime_config_whisplay_profile_disables_conflicting_gpio_button() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_HARDWARE_PROFILE": "whisplay",
+            "DEVICE_BUTTON_ADAPTER": "gpio",
+        }
+    )
+
+    assert config.display_adapter == "whisplay"
+    assert config.button_adapter == "whisplay"
+    assert any("GPIO17" in warning for warning in config.config_warnings)
+
+
+def test_runtime_config_generic_profile_preserves_manual_adapter_selection() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_HARDWARE_PROFILE": "generic",
+            "DEVICE_DISPLAY_ADAPTER": "whisplay",
+            "DEVICE_BUTTON_ADAPTER": "gpio",
+            "DEVICE_RGB_ADAPTER": "none",
+        }
+    )
+
+    assert config.resolved_hardware_profile == "generic"
+    assert config.display_adapter == "whisplay"
+    assert config.button_adapter == "gpio"
+    assert config.rgb_adapter == "none"
+    assert config.config_warnings == ()
+
+
+def test_runtime_config_rejects_invalid_whisplay_backlight() -> None:
+    with pytest.raises(ValueError, match="DEVICE_WHISPLAY_BACKLIGHT"):
+        load_runtime_config(
+            {
+                "DEVICE_ID": "raspi-1",
+                "DEVICE_WS_URL": "ws://localhost/ws",
+                "DEVICE_WHISPLAY_BACKLIGHT": "120",
+            }
+        )
 
 
 def test_runtime_config_rejects_invalid_integer_values() -> None:
@@ -45,17 +122,68 @@ def test_runtime_config_rejects_invalid_integer_values() -> None:
         )
 
 
+def test_runtime_config_requires_explicit_websocket_url() -> None:
+    with pytest.raises(ValueError, match="standalone Raspberry deployment"):
+        load_runtime_config({"DEVICE_ID": "raspi-1"})
+
+
+def test_runtime_config_rejects_non_websocket_urls() -> None:
+    with pytest.raises(ValueError, match="valid ws:// or wss:// URL"):
+        load_runtime_config({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "http://localhost/ws"})
+
+
 def test_display_model_service_builds_shared_focus_labels() -> None:
     snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.AGENTS)
     snapshot.agents = ["assistant-general", "assistant-tech"]
     snapshot.navigation.focused_agent_index = 1
     snapshot.warnings = ["audio_in unavailable"]
+    snapshot.connected = True
+    snapshot.diagnostics.transport_status = "connected"
 
-    model = DisplayModelService().build(snapshot)
+    model = DisplayModelService().build(snapshot, PowerStatus(78.0, True, "pisugar", True, "ok"))
 
     assert model.local_state == "AGENTS"
     assert model.focus_label == "assistant-tech"
     assert model.warnings == ["audio_in unavailable"]
+    assert model.scene == "agent-selection"
+    assert model.battery_label == "BAT 78% CHG"
+    assert model.network_label == "NET CONNECTED"
+    assert model.center_title == "assistant-tech"
+    assert model.center_body == "Agent 2/2"
+
+
+def test_experience_service_builds_screen_and_rgb_from_single_snapshot() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot.connected = True
+    snapshot.remote_ui_state = UiState.PROCESSING
+
+    experience = ExperienceService().build(snapshot, PowerStatus(51.0, False, "pisugar", True, "ok"))
+
+    assert experience.screen.scene == "processing"
+    assert experience.rgb_signal.state == "processing"
+    assert experience.power.battery_percent == 51.0
+
+
+def test_rgb_policy_prefers_disconnected_over_ready_state() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    signal = RgbPolicyService().select(snapshot, PowerStatus(None, None, "pisugar", False, "offline"))
+
+    assert signal.state == "disconnected"
+    assert signal.style == "pulse"
+    assert signal.color == (64, 196, 255)
+
+
+def test_rgb_policy_uses_vivid_ready_and_listening_colors() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot.connected = True
+
+    ready = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
+    snapshot.device_state = DeviceState.LISTEN
+    snapshot.listening_active = True
+    listening = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
+
+    assert ready.color == (56, 231, 109)
+    assert listening.color == (255, 214, 10)
 
 
 def test_diagnostics_service_derives_warnings_from_capabilities() -> None:
@@ -80,6 +208,23 @@ def test_raspi_bootstrap_builds_degraded_null_runtime() -> None:
     assert runtime.snapshot.device_id == "raspi-1"
     assert runtime.snapshot.capabilities.transport.detail == "adapter=websocket"
     assert "screen degraded: adapter=null" in runtime.snapshot.warnings
+    assert "power degraded: adapter=none" in runtime.snapshot.warnings
+    assert "rgb degraded: adapter=none" in runtime.snapshot.warnings
+
+
+def test_raspi_bootstrap_records_whisplay_profile_resolution_warnings() -> None:
+    runtime = build_runtime(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_DISPLAY_ADAPTER": "whisplay",
+            "DEVICE_BUTTON_ADAPTER": "gpio",
+        }
+    )
+
+    assert runtime.config.resolved_hardware_profile == "whisplay"
+    assert runtime.snapshot.diagnostics.metadata["hardware_profile"] == "whisplay"
+    assert any("vendor bundle already owns the button" in warning for warning in runtime.snapshot.warnings)
 
 
 def test_raspi_bootstrap_builds_non_simulated_hello_payload() -> None:
@@ -194,6 +339,8 @@ async def test_runtime_runner_routes_assistant_audio_chunks_to_playback() -> Non
             button=NullButton(),
             audio_capture=NullAudioCapture(),
             audio_playback=playback,
+            power=NullPowerStatus(),
+            rgb=NullRgb(),
             diagnostics=NullDiagnostics(),
         ),
         transport=AudioTransport(),

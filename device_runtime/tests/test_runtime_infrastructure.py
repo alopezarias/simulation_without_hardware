@@ -14,9 +14,9 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.shared.protocol import build_message
 from device_runtime.infrastructure.audio.pcm_chunker import PcmChunker
 from device_runtime.infrastructure.transport.websocket_client import SessionNotReadyError, WebSocketTransport
+from device_runtime.protocol import build_message
 
 
 class FakeWs:

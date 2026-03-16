@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "device-runtime"
+version = "0.1.0"
+description = "Standalone Raspberry device runtime for simulation_without_hardware"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=12,<16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.2,<9",
+  "pytest-asyncio>=1.2.0,<2",
+]
+raspi = [
+  "gpiozero>=2,<3",
+  "pyalsaaudio>=0.11,<1",
+  "sounddevice>=0.4,<1",
+]
+
+[project.scripts]
+device-runtime = "device_runtime.entrypoints.raspi_main:main"
+device-runtime-smoke = "device_runtime.entrypoints.smoke:main"
+
+[tool.setuptools]
+include-package-data = true
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["device_runtime*"]

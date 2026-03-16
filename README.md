@@ -17,7 +17,7 @@ Python MVP for a conversational device before real hardware exists. The reposito
 | --- | --- |
 | `backend/` | FastAPI + WebSocket backend that manages sessions, protocol events, speech pipeline, agent routing, and device-facing responses. |
 | `simulator/` | CLI and Tkinter UI that emulate the device interactions, transport, and local audio behavior. |
-| `device_runtime/` | Shared runtime extracted from the simulator for reusable device logic and Raspberry Pi-oriented adapters. |
+| `device_runtime/` | Standalone Raspberry runtime package with its own protocol boundary, Whisplay/PiSugar/RGB adapters, deploy scripts, and `systemd` assets. |
 | `docs/` | ADRs and supporting design notes. |
 
 ### Core capabilities today
@@ -91,10 +91,22 @@ Desktop simulator UI:
 python -m simulator.entrypoints.ui --ws-url ws://127.0.0.1:8000/ws
 ```
 
-Shared runtime bootstrap:
+Shared runtime bootstrap from the monorepo:
 
 ```bash
 DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws python -m device_runtime.entrypoints.raspi_main
+```
+
+Standalone Raspberry package flow:
+
+```bash
+cd device_runtime
+cp .env.example .env
+sudo bash scripts/install_raspberry.sh
+nano .env
+./scripts/run_runtime.sh
+sudo systemctl enable device-runtime.service
+sudo systemctl restart device-runtime.service
 ```
 
 ## Common workflows
@@ -158,28 +170,38 @@ pip install -r simulator/requirements.txt
 |- requirements*.txt
 ```
 
-## Raspberry Pi and adapter notes
+## Raspberry Pi deployment notes
 
-- `device_runtime/` includes `null`, development, and Raspberry-oriented adapter options for display, button input, and audio I/O.
-- The Raspberry-targeted adapters are designed to fall back to safe `null_*` behavior with clear warnings when host-specific dependencies are unavailable.
-- The simulator UI already reuses shared runtime adapters such as keyboard button handling and `sounddevice` audio paths.
+- On the Pi, only `device_runtime/` is deployed; the backend stays on the user's PC.
+- The only required network binding is `DEVICE_WS_URL=ws://<pc-ip>:8000/ws` or `wss://...`.
+- The happy path is manual and direct: copy `device_runtime/` to a clear final folder on the Pi such as `~/device_runtime`, keep `~/device_runtime/.env`, and run from there.
+- `device_runtime/scripts/deploy_raspberry.sh` can still use `/tmp` as staging for a repeatable remote copy/install/configure/restart flow, but it leaves the final runtime in a persistent folder with local config.
+- `device_runtime/scripts/smoke_check.sh` verifies installed-package bootstrap and optional TCP reachability to the configured backend.
+- `/etc/device-runtime/device-runtime.env` is now optional compatibility fallback, not the primary documented path.
+- `wakeword`, `camera`, and `whisplay-im` remain intentionally excluded from this runtime package.
 
 Useful environment variables:
 
 ```env
+DEVICE_HARDWARE_PROFILE=auto|generic|whisplay
 DEVICE_DISPLAY_ADAPTER=null|whisplay
-DEVICE_BUTTON_ADAPTER=null|keyboard|gpio
+DEVICE_BUTTON_ADAPTER=null|keyboard|gpio|whisplay
 DEVICE_AUDIO_IN_ADAPTER=null|sounddevice|alsa
 DEVICE_AUDIO_OUT_ADAPTER=null|sounddevice|alsa
 DEVICE_FAIL_FAST_ON_MISSING_BUTTON=false
+DEVICE_POWER_ADAPTER=pisugar
+DEVICE_RGB_ADAPTER=hardware
+DEVICE_WHISPLAY_DRIVER_PATH=~/Whisplay/Driver
 ```
+
+On the real Whisplay Raspberry target, the recommended baseline is `DEVICE_HARDWARE_PROFILE=whisplay`, `DEVICE_BUTTON_ADAPTER=whisplay`, and audio adapters left at `null` unless you have explicitly validated an external non-conflicting path. With that profile active, `DEVICE_DISPLAY_ADAPTER=whisplay` is enforced, the button comes from the vendor board instead of GPIO17, and `DEVICE_RGB_ADAPTER=hardware` becomes the safe integrated default.
 
 ## Current status
 
 This is an MVP focused on reducing risk before hardware integration.
 
 - Strong coverage: protocol contract, device states, button semantics, simulator UX, backend orchestration, local speech pipeline, and automated scenario testing.
-- Partial/iterative areas: production-grade hardware adapters, final embedded hardening, and real-device deployment concerns.
+- Partial/iterative areas: final real-device validation on Pi hardware, exact PiSugar/RGB vendor nuances, and broader production hardening.
 
 `MVP_ALIGNMENT.md` documents the current scope against the broader conversational-device vision.
 

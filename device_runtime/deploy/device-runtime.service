@@ -1,0 +1,18 @@
+[Unit]
+Description=Standalone Raspberry device runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__DEVICE_RUNTIME_USER__
+Group=__DEVICE_RUNTIME_GROUP__
+WorkingDirectory=__DEVICE_RUNTIME_ROOT__
+ExecStart=__DEVICE_RUNTIME_ROOT__/scripts/run_runtime.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
