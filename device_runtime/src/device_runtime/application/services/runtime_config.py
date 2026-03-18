@@ -42,6 +42,13 @@ class RuntimeConfig:
     audio_sample_rate: int = 16000
     audio_channels: int = 1
     audio_chunk_ms: int = 120
+    audio_in_alsa_device: str = "default"
+    audio_out_alsa_device: str = "default"
+    audio_in_alsa_period_size: int = 0
+    audio_out_alsa_period_size: int = 0
+    audio_out_chunk_ms: int = 200
+    audio_in_alsa_nonblock: bool = False
+    audio_out_start_buffer_ms: int = 1000
     diagnostics_enabled: bool = True
     fail_fast_on_missing_transport: bool = True
     fail_fast_on_missing_button: bool = False
@@ -78,6 +85,14 @@ class RuntimeConfig:
             raise ValueError("DEVICE_AUDIO_CHANNELS must be > 0")
         if self.audio_chunk_ms <= 0:
             raise ValueError("DEVICE_AUDIO_CHUNK_MS must be > 0")
+        if self.audio_in_alsa_period_size < 0:
+            raise ValueError("DEVICE_AUDIO_IN_ALSA_PERIOD_SIZE must be >= 0")
+        if self.audio_out_alsa_period_size < 0:
+            raise ValueError("DEVICE_AUDIO_OUT_ALSA_PERIOD_SIZE must be >= 0")
+        if self.audio_out_chunk_ms <= 0:
+            raise ValueError("DEVICE_AUDIO_OUT_CHUNK_MS must be > 0")
+        if self.audio_out_start_buffer_ms < 0:
+            raise ValueError("DEVICE_AUDIO_OUT_START_BUFFER_MS must be >= 0")
         if self.hardware_profile not in {
             DEFAULT_HARDWARE_PROFILE,
             GENERIC_HARDWARE_PROFILE,

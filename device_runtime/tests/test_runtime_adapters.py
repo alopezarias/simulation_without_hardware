@@ -594,17 +594,23 @@ def test_alsa_adapters_accept_injected_pcm_doubles() -> None:
         def setrate(self, value: int) -> None:
             self.configured.append(("rate", value))
 
+        def setperiodsize(self, value: int) -> None:
+            self.configured.append(("period", value))
+
         def write(self, payload: bytes) -> None:
             written.append(payload)
 
-    capture = AlsaCapture(pcm_factory=CapturePcm)
+    capture = AlsaCapture(pcm_factory=CapturePcm, chunk_ms=80, period_size=512)
     capture.start()
+    capture_pcm = capture._pcm
     chunks = capture.read_chunks(2)
     capture.stop()
 
-    playback = AlsaPlayback(pcm_factory=PlaybackPcm)
+    playback = AlsaPlayback(pcm_factory=PlaybackPcm, period_size=256, start_buffer_ms=0)
     playback.start(sample_rate=16000, channels=1)
+    playback_pcm = playback._pcm
     playback.push(b"pcm")
+    playback.end_session()
     playback.stop(clear_buffer=False)
 
     assert chunks[0]["payload"] == "YWJj"
@@ -612,6 +618,61 @@ def test_alsa_adapters_accept_injected_pcm_doubles() -> None:
     assert written == [b"pcm"]
     assert capture.available is True
     assert playback.available is True
+    assert capture_pcm is not None and ("period", 512) in capture_pcm.configured
+    assert playback_pcm is not None and ("period", 256) in playback_pcm.configured
+
+
+def test_alsa_playback_waits_for_prebuffer_before_writing() -> None:
+    written: list[bytes] = []
+
+    class PlaybackPcm:
+        def setchannels(self, _value: int) -> None:
+            return None
+
+        def setrate(self, _value: int) -> None:
+            return None
+
+        def setperiodsize(self, _value: int) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+    playback = AlsaPlayback(pcm_factory=PlaybackPcm, period_size=4, chunk_ms=20, start_buffer_ms=40)
+    playback.start(sample_rate=100, channels=1)
+    playback.push(b"12")
+    assert written == []
+
+    playback.push(b"345678")
+    assert written == [b"12345678"]
+
+
+def test_alsa_playback_uses_larger_runtime_chunks_after_one_second_prebuffer() -> None:
+    written: list[bytes] = []
+
+    class PlaybackPcm:
+        def setchannels(self, _value: int) -> None:
+            return None
+
+        def setrate(self, _value: int) -> None:
+            return None
+
+        def setperiodsize(self, _value: int) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+    playback = AlsaPlayback(pcm_factory=PlaybackPcm, chunk_ms=200, start_buffer_ms=1000)
+    playback.start(sample_rate=10, channels=1)
+    for payload in [b"aa", b"bb", b"cc", b"dd", b"ee", b"ff", b"gg", b"hh", b"ii"]:
+        playback.push(payload)
+
+    assert written == []
+
+    playback.push(b"jj")
+
+    assert written == [b"aabb", b"ccdd", b"eeff", b"gghh", b"iijj"]
 
 
 def test_raspi_bootstrap_degrades_missing_real_adapters_without_import_failures() -> None:

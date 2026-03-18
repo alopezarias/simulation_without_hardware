@@ -60,7 +60,6 @@ class RuntimeObserver(StateObserver):
         self._runtime = runtime
         self._experience_service = ExperienceService()
         self._was_listening = False
-        self._playback_started = False
 
     def publish(self, snapshot: DeviceSnapshot) -> None:
         listening = snapshot.device_state == DeviceState.LISTEN and snapshot.listening_active
@@ -78,18 +77,6 @@ class RuntimeObserver(StateObserver):
         note = snapshot.diagnostics.last_error or snapshot.diagnostics.last_note
         if note:
             self._runtime.display.show_diagnostic(note)
-
-        remote_state = str(snapshot.remote_ui_state.value)
-        if remote_state == "speaking" and getattr(self._runtime.audio_playback, "available", False):
-            if not self._playback_started:
-                self._runtime.audio_playback.start(
-                    sample_rate=self._runtime.config.audio_sample_rate,
-                    channels=self._runtime.config.audio_channels,
-                )
-                self._playback_started = True
-        elif self._playback_started:
-            self._runtime.audio_playback.stop(clear_buffer=False)
-            self._playback_started = False
 
     def _safe_power_status(self) -> PowerStatus:
         try:
@@ -455,10 +442,17 @@ def _resolve_audio_capture(config: RuntimeConfig) -> tuple[Any, CapabilityState]
             CapabilityState("audio_in", CapabilityStatus.ENABLED, "adapter=sounddevice"),
         )
     if adapter == "alsa":
-        capture = AlsaCapture(sample_rate=config.audio_sample_rate, channels=config.audio_channels)
+        capture = AlsaCapture(
+            sample_rate=config.audio_sample_rate,
+            channels=config.audio_channels,
+            chunk_ms=config.audio_chunk_ms,
+            device=config.audio_in_alsa_device,
+            period_size=config.audio_in_alsa_period_size,
+            nonblock=config.audio_in_alsa_nonblock,
+        )
         if not capture.available:
             return NullAudioCapture(), CapabilityState("audio_in", CapabilityStatus.UNAVAILABLE, "adapter=alsa missing dependency")
-        return capture, CapabilityState("audio_in", CapabilityStatus.ENABLED, "adapter=alsa")
+        return capture, CapabilityState("audio_in", CapabilityStatus.ENABLED, f"adapter=alsa device={config.audio_in_alsa_device}")
     return NullAudioCapture(), CapabilityState("audio_in", CapabilityStatus.DEGRADED, f"adapter={adapter} unsupported")
 
 
@@ -471,10 +465,15 @@ def _resolve_audio_playback(config: RuntimeConfig) -> tuple[Any, CapabilityState
             return NullAudioPlayback(), CapabilityState("audio_out", CapabilityStatus.UNAVAILABLE, "adapter=sounddevice missing dependency")
         return SoundDevicePlayback(), CapabilityState("audio_out", CapabilityStatus.ENABLED, "adapter=sounddevice")
     if adapter == "alsa":
-        playback = AlsaPlayback()
+        playback = AlsaPlayback(
+            device=config.audio_out_alsa_device,
+            period_size=config.audio_out_alsa_period_size,
+            chunk_ms=config.audio_out_chunk_ms,
+            start_buffer_ms=config.audio_out_start_buffer_ms,
+        )
         if not playback.available:
             return NullAudioPlayback(), CapabilityState("audio_out", CapabilityStatus.UNAVAILABLE, "adapter=alsa missing dependency")
-        return playback, CapabilityState("audio_out", CapabilityStatus.ENABLED, "adapter=alsa")
+        return playback, CapabilityState("audio_out", CapabilityStatus.ENABLED, f"adapter=alsa device={config.audio_out_alsa_device}")
     return NullAudioPlayback(), CapabilityState("audio_out", CapabilityStatus.DEGRADED, f"adapter={adapter} unsupported")
 
 

@@ -117,8 +117,8 @@ Useful variants:
 # development-friendly shared adapters
 DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_BUTTON_ADAPTER=keyboard DEVICE_AUDIO_IN_ADAPTER=sounddevice DEVICE_AUDIO_OUT_ADAPTER=sounddevice python -m device_runtime.entrypoints.raspi_main
 
-# Raspberry-oriented adapter selection with safe degradation when host libraries are missing
-DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_HARDWARE_PROFILE=whisplay DEVICE_DISPLAY_ADAPTER=whisplay DEVICE_BUTTON_ADAPTER=whisplay DEVICE_AUDIO_IN_ADAPTER=null DEVICE_AUDIO_OUT_ADAPTER=null DEVICE_POWER_ADAPTER=pisugar DEVICE_RGB_ADAPTER=hardware python -m device_runtime.entrypoints.raspi_main
+# Raspberry-oriented adapter selection with Whisplay/WM8960 audio defaults
+DEVICE_ID=raspi-dev DEVICE_WS_URL=ws://127.0.0.1:8000/ws DEVICE_HARDWARE_PROFILE=whisplay DEVICE_DISPLAY_ADAPTER=whisplay DEVICE_BUTTON_ADAPTER=whisplay DEVICE_AUDIO_IN_ADAPTER=alsa DEVICE_AUDIO_OUT_ADAPTER=alsa DEVICE_AUDIO_IN_ALSA_DEVICE=plughw:wm8960soundcard,0 DEVICE_AUDIO_OUT_ALSA_DEVICE=plughw:wm8960soundcard,0 DEVICE_POWER_ADAPTER=pisugar DEVICE_RGB_ADAPTER=hardware python -m device_runtime.entrypoints.raspi_main
 ```
 
 Expected behavior:
@@ -184,15 +184,28 @@ Optional but typical Raspberry values:
 DEVICE_HARDWARE_PROFILE=whisplay
 DEVICE_DISPLAY_ADAPTER=whisplay
 DEVICE_BUTTON_ADAPTER=whisplay
-DEVICE_AUDIO_IN_ADAPTER=null
-DEVICE_AUDIO_OUT_ADAPTER=null
+DEVICE_AUDIO_IN_ADAPTER=alsa
+DEVICE_AUDIO_OUT_ADAPTER=alsa
+DEVICE_AUDIO_IN_ALSA_DEVICE=plughw:wm8960soundcard,0
+DEVICE_AUDIO_OUT_ALSA_DEVICE=plughw:wm8960soundcard,0
 DEVICE_POWER_ADAPTER=pisugar
 DEVICE_RGB_ADAPTER=hardware
 DEVICE_WHISPLAY_DRIVER_PATH=~/Whisplay/Driver
 DEVICE_WHISPLAY_BACKLIGHT=50
+DEVICE_AUDIO_OUT_CHUNK_MS=200
+DEVICE_AUDIO_OUT_START_BUFFER_MS=1000
 ```
 
-When `DEVICE_HARDWARE_PROFILE=whisplay` is active, the runtime treats Whisplay as one integrated hardware bundle. It forces the Whisplay display path, routes button clicks through the vendor board with `DEVICE_BUTTON_ADAPTER=whisplay`, keeps RGB on the vendor controller by default, and rejects `DEVICE_BUTTON_ADAPTER=gpio` automatically because separate GPIO17 access conflicts with the vendor-owned button on real Raspberry hardware. If you later enable external audio adapters, validate them on the Pi first so they do not collide with the integrated microphone/speaker path.
+When `DEVICE_HARDWARE_PROFILE=whisplay` is active, the runtime treats Whisplay as one integrated hardware bundle. It forces the Whisplay display path, routes button clicks through the vendor board with `DEVICE_BUTTON_ADAPTER=whisplay`, keeps RGB on the vendor controller by default, and rejects `DEVICE_BUTTON_ADAPTER=gpio` automatically because separate GPIO17 access conflicts with the vendor-owned button on real Raspberry hardware. For audio, the runtime now defaults Whisplay ALSA devices to `plughw:wm8960soundcard,0`, which is more tolerant than raw `hw:` for the integrated WM8960 codec.
+
+Audio tuning knobs for the Pi:
+
+- `DEVICE_AUDIO_SAMPLE_RATE`, `DEVICE_AUDIO_CHANNELS`, `DEVICE_AUDIO_CHUNK_MS` tune the runtime-side capture/upload contract.
+- `DEVICE_AUDIO_IN_ALSA_DEVICE` and `DEVICE_AUDIO_OUT_ALSA_DEVICE` pick the exact ALSA endpoints.
+- `DEVICE_AUDIO_IN_ALSA_PERIOD_SIZE` and `DEVICE_AUDIO_IN_ALSA_NONBLOCK` tune ALSA capture open/read behavior.
+- `DEVICE_AUDIO_OUT_CHUNK_MS` controls how much assistant PCM the runtime aggregates per playback write; start with `200` on the Pi.
+- `DEVICE_AUDIO_OUT_START_BUFFER_MS` controls how much assistant audio must be buffered before playback starts; start with `1000` on the Pi. The older `DEVICE_AUDIO_OUT_BUFFER_MS` name still works as an alias.
+- `DEVICE_AUDIO_OUT_ALSA_PERIOD_SIZE` remains the lower-level ALSA playback knob if you need to experiment beyond the runtime defaults.
 
 The current Raspberry UX tuning favors hardware-visible colors and a quieter screen layout: `ready` / `charging` = vivid green, `listening` = vivid yellow, `speaking` / `disconnected` = vivid blue, `error` = vivid red. On screen, the state stays top-left, battery top-right, and the center block carries the only main interaction text so the small panel does not feel crowded.
 
@@ -226,6 +239,7 @@ sudo journalctl -u device-runtime.service -f
 3. Trigger a backend reply and verify the LED turns vivid blue while the centered area prioritizes the assistant response.
 4. Disconnect the backend or change `DEVICE_WS_URL` temporarily and verify the LED switches to vivid blue pulse plus an obvious offline message.
 5. Force an error path if available and confirm the LED turns vivid red with the diagnostic centered clearly enough to read at arm's length.
+6. Run `arecord -D plughw:wm8960soundcard,0 -f S16_LE -r 16000 -c 1 /tmp/test.wav` and `aplay -D plughw:wm8960soundcard,0 /tmp/test.wav` outside the runtime if transcription or playback still sounds wrong; if that path fails, fix ALSA/device-level issues before blaming the runtime.
 
 ### Run smoke checks on the Pi
 

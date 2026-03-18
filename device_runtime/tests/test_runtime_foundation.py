@@ -66,6 +66,24 @@ def test_runtime_config_implicitly_enables_whisplay_bundle_when_display_uses_ven
     assert config.whisplay_bundle_active is True
 
 
+def test_runtime_config_whisplay_defaults_wm8960_plughw_when_alsa_audio_enabled() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_HARDWARE_PROFILE": "whisplay",
+            "DEVICE_AUDIO_IN_ADAPTER": "alsa",
+            "DEVICE_AUDIO_OUT_ADAPTER": "alsa",
+        }
+    )
+
+    assert config.audio_in_alsa_device == "plughw:wm8960soundcard,0"
+    assert config.audio_out_alsa_device == "plughw:wm8960soundcard,0"
+    assert config.audio_out_chunk_ms == 200
+    assert config.audio_out_start_buffer_ms == 1000
+    assert any("WM8960 codec" in warning for warning in config.config_warnings)
+
+
 def test_runtime_config_whisplay_profile_disables_conflicting_gpio_button() -> None:
     config = load_runtime_config(
         {
@@ -118,6 +136,40 @@ def test_runtime_config_rejects_invalid_integer_values() -> None:
                 "DEVICE_ID": "raspi-1",
                 "DEVICE_WS_URL": "ws://localhost/ws",
                 "DEVICE_AUDIO_CHUNK_MS": "abc",
+            }
+        )
+
+
+def test_runtime_config_accepts_legacy_playback_buffer_alias() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_AUDIO_OUT_BUFFER_MS": "750",
+        }
+    )
+
+    assert config.audio_out_start_buffer_ms == 750
+
+
+def test_runtime_config_rejects_negative_alsa_buffer_values() -> None:
+    with pytest.raises(ValueError, match="DEVICE_AUDIO_OUT_START_BUFFER_MS"):
+        load_runtime_config(
+            {
+                "DEVICE_ID": "raspi-1",
+                "DEVICE_WS_URL": "ws://localhost/ws",
+                "DEVICE_AUDIO_OUT_START_BUFFER_MS": "-1",
+            }
+        )
+
+
+def test_runtime_config_rejects_invalid_playback_chunk_size() -> None:
+    with pytest.raises(ValueError, match="DEVICE_AUDIO_OUT_CHUNK_MS"):
+        load_runtime_config(
+            {
+                "DEVICE_ID": "raspi-1",
+                "DEVICE_WS_URL": "ws://localhost/ws",
+                "DEVICE_AUDIO_OUT_CHUNK_MS": "0",
             }
         )
 
@@ -225,6 +277,24 @@ def test_raspi_bootstrap_records_whisplay_profile_resolution_warnings() -> None:
     assert runtime.config.resolved_hardware_profile == "whisplay"
     assert runtime.snapshot.diagnostics.metadata["hardware_profile"] == "whisplay"
     assert any("vendor bundle already owns the button" in warning for warning in runtime.snapshot.warnings)
+
+
+def test_raspi_bootstrap_applies_separate_capture_and_playback_audio_tuning() -> None:
+    runtime = build_runtime(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_AUDIO_IN_ADAPTER": "alsa",
+            "DEVICE_AUDIO_OUT_ADAPTER": "alsa",
+            "DEVICE_AUDIO_CHUNK_MS": "80",
+            "DEVICE_AUDIO_OUT_CHUNK_MS": "200",
+            "DEVICE_AUDIO_OUT_START_BUFFER_MS": "1000",
+        }
+    )
+
+    assert runtime.config.audio_chunk_ms == 80
+    assert runtime.config.audio_out_chunk_ms == 200
+    assert runtime.config.audio_out_start_buffer_ms == 1000
 
 
 def test_raspi_bootstrap_builds_non_simulated_hello_payload() -> None:

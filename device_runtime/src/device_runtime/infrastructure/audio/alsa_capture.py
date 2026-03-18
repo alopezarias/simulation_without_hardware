@@ -24,14 +24,21 @@ class AlsaCapture:
         pcm_factory: Callable[[], Any] | None = None,
         sample_rate: int = 16000,
         channels: int = 1,
+        chunk_ms: int = 120,
+        device: str = "default",
+        period_size: int = 0,
+        nonblock: bool = False,
     ) -> None:
         self._pcm_factory = pcm_factory
         self.sample_rate = sample_rate
         self.channels = channels
+        self.chunk_ms = chunk_ms
+        self.device = device
+        self.nonblock = nonblock
         self._pcm: Any | None = None
         self.started = False
-        self.chunk_ms = 120
-        self.period_size = max(1, int(sample_rate * self.chunk_ms / 1000))
+        computed_period_size = max(1, int(sample_rate * self.chunk_ms / 1000))
+        self.period_size = period_size or computed_period_size
         self._chunker = PcmChunker(sample_rate=sample_rate, channels=channels, chunk_ms=self.chunk_ms)
         self._seq = 0
         self._started_monotonic = 0.0
@@ -53,7 +60,9 @@ class AlsaCapture:
             raise RuntimeError("ALSA capture adapter requires pyalsaaudio on Raspberry Pi" + detail)
         else:
             pcm_kwargs: dict[str, Any] = {}
-            mode = getattr(_alsaaudio, "PCM_NONBLOCK", None)
+            if self.device:
+                pcm_kwargs["device"] = self.device
+            mode = getattr(_alsaaudio, "PCM_NONBLOCK", None) if self.nonblock else None
             if mode is not None:
                 pcm_kwargs["mode"] = mode
             self._pcm = _alsaaudio.PCM(_alsaaudio.PCM_CAPTURE, **pcm_kwargs)

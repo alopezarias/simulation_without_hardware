@@ -43,6 +43,18 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         audio_sample_rate=_get_int(values, "DEVICE_AUDIO_SAMPLE_RATE", 16000),
         audio_channels=_get_int(values, "DEVICE_AUDIO_CHANNELS", 1),
         audio_chunk_ms=_get_int(values, "DEVICE_AUDIO_CHUNK_MS", 120),
+        audio_in_alsa_device=values.get("DEVICE_AUDIO_IN_ALSA_DEVICE", "default").strip() or "default",
+        audio_out_alsa_device=values.get("DEVICE_AUDIO_OUT_ALSA_DEVICE", "default").strip() or "default",
+        audio_in_alsa_period_size=_get_int(values, "DEVICE_AUDIO_IN_ALSA_PERIOD_SIZE", 0),
+        audio_out_alsa_period_size=_get_int(values, "DEVICE_AUDIO_OUT_ALSA_PERIOD_SIZE", 0),
+        audio_out_chunk_ms=_get_int(values, "DEVICE_AUDIO_OUT_CHUNK_MS", 200),
+        audio_in_alsa_nonblock=_get_bool(values, "DEVICE_AUDIO_IN_ALSA_NONBLOCK", False),
+        audio_out_start_buffer_ms=_get_int_with_alias(
+            values,
+            "DEVICE_AUDIO_OUT_START_BUFFER_MS",
+            "DEVICE_AUDIO_OUT_BUFFER_MS",
+            1000,
+        ),
         diagnostics_enabled=_get_bool(values, "DEVICE_DIAGNOSTICS_ENABLED", True),
         fail_fast_on_missing_transport=_get_bool(values, "DEVICE_FAIL_FAST_ON_MISSING_TRANSPORT", True),
         fail_fast_on_missing_button=_get_bool(values, "DEVICE_FAIL_FAST_ON_MISSING_BUTTON", False),
@@ -70,6 +82,7 @@ def _resolve_hardware_profile(config: RuntimeConfig) -> None:
 
 def _apply_whisplay_bundle_resolution(config: RuntimeConfig) -> list[str]:
     warnings: list[str] = []
+    wm8960_device = "plughw:wm8960soundcard,0"
     if config.display_adapter.strip().lower() != WHISPLAY_HARDWARE_PROFILE:
         config.display_adapter = WHISPLAY_HARDWARE_PROFILE
         warnings.append(
@@ -96,12 +109,22 @@ def _apply_whisplay_bundle_resolution(config: RuntimeConfig) -> list[str]:
 
     audio_in = config.audio_in_adapter.strip().lower()
     if audio_in not in {"", "none", "null", "disabled"}:
+        if audio_in == "alsa" and config.audio_in_alsa_device == "default":
+            config.audio_in_alsa_device = wm8960_device
+            warnings.append(
+                "Whisplay hardware profile defaulted DEVICE_AUDIO_IN_ALSA_DEVICE=plughw:wm8960soundcard,0 for the integrated WM8960 codec"
+            )
         warnings.append(
             f"Whisplay hardware profile kept DEVICE_AUDIO_IN_ADAPTER={config.audio_in_adapter}; verify it does not conflict with the integrated microphone path"
         )
 
     audio_out = config.audio_out_adapter.strip().lower()
     if audio_out not in {"", "none", "null", "disabled"}:
+        if audio_out == "alsa" and config.audio_out_alsa_device == "default":
+            config.audio_out_alsa_device = wm8960_device
+            warnings.append(
+                "Whisplay hardware profile defaulted DEVICE_AUDIO_OUT_ALSA_DEVICE=plughw:wm8960soundcard,0 for the integrated WM8960 codec"
+            )
         warnings.append(
             f"Whisplay hardware profile kept DEVICE_AUDIO_OUT_ADAPTER={config.audio_out_adapter}; verify it does not conflict with the integrated speaker path"
         )
@@ -117,6 +140,14 @@ def _get_int(values: Mapping[str, str], key: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"{key} must be an integer") from exc
+
+
+def _get_int_with_alias(values: Mapping[str, str], key: str, alias: str, default: int) -> int:
+    if key in values and values[key].strip():
+        return _get_int(values, key, default)
+    if alias in values and values[alias].strip():
+        return _get_int(values, alias, default)
+    return default
 
 
 def _get_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
