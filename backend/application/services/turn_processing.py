@@ -28,30 +28,30 @@ async def stream_pcm_audio_file(
     source: str,
     loopback: bool = False,
 ) -> int:
-    codec = "pcm16"
-    bytes_per_second = max(1, sample_rate * channels * 2)
-    chunk_size = max(256, int(bytes_per_second * ctx.settings.loopback_chunk_ms / 1000))
-    total_bytes = 0
-    seq = 0
-    timestamp_ms = 0
-
     try:
-        total_bytes = os.path.getsize(pcm_path)
-    except OSError:
-        total_bytes = 0
-
-    try:
+        asset = await asyncio.to_thread(
+            ctx.playback_asset_store.publish_file,
+            pcm_path,
+            codec="pcm16",
+            sample_rate=sample_rate,
+            channels=channels,
+            source=source,
+            loopback=loopback,
+        )
         await send(
             session,
             build_message(
-                "assistant.audio.start",
+                "assistant.audio.file",
                 turn_id=turn_id,
-                codec=codec,
-                sample_rate=sample_rate,
-                channels=channels,
-                source=source,
-                loopback=loopback,
-                total_bytes=total_bytes,
+                audio_id=asset.audio_id,
+                url=f"/audio/{asset.audio_id}",
+                codec=asset.codec,
+                sample_rate=asset.sample_rate,
+                channels=asset.channels,
+                size_bytes=asset.size_bytes,
+                source=asset.source,
+                loopback=asset.loopback,
+                expires_at=asset.expires_at,
             ),
         )
     except Exception as exc:
@@ -60,59 +60,7 @@ async def stream_pcm_audio_file(
             session.interrupted.set()
             raise asyncio.CancelledError() from exc
         raise
-
-    try:
-        with open(pcm_path, "rb") as handle:
-            while True:
-                if session.interrupted.is_set():
-                    break
-
-                chunk = handle.read(chunk_size)
-                if not chunk:
-                    break
-
-                duration_ms = max(1, int(len(chunk) * 1000 / bytes_per_second))
-                encoded = base64.b64encode(chunk).decode("ascii")
-                try:
-                    await send(
-                        session,
-                        build_message(
-                            "assistant.audio.chunk",
-                            turn_id=turn_id,
-                            seq=seq,
-                            timestamp_ms=timestamp_ms,
-                            duration_ms=duration_ms,
-                            payload=encoded,
-                            source=source,
-                            loopback=loopback,
-                        ),
-                    )
-                except Exception as exc:
-                    detail = str(exc).lower()
-                    if "websocket.close" in detail or "response already completed" in detail:
-                        session.interrupted.set()
-                        raise asyncio.CancelledError() from exc
-                    raise
-
-                seq += 1
-                timestamp_ms += duration_ms
-                await asyncio.sleep(duration_ms / 1000)
-    finally:
-        try:
-            await send(
-                session,
-                build_message(
-                    "assistant.audio.end",
-                    turn_id=turn_id,
-                    source=source,
-                    loopback=loopback,
-                    total_chunks=seq,
-                ),
-            )
-        except Exception:
-            pass
-
-    return seq
+    return 1
 
 
 async def stream_loopback_audio(ctx: AppContext, session: DeviceSession, turn_id: str) -> bool:

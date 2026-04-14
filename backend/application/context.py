@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.application.ports import AssistantPort, AudioStorePort, SpeechPort
+from backend.application.ports import AssistantPort, AudioStorePort, PlaybackAssetStorePort, SpeechPort
 from backend.config.settings import BackendSettings
 
 
@@ -14,3 +14,4 @@ class AppContext:
     assistant: AssistantPort
     speech: SpeechPort
     audio_store: AudioStorePort
+    playback_asset_store: PlaybackAssetStorePort

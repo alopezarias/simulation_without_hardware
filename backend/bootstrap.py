@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from backend.shared.protocol import validate_device_message
 
@@ -19,6 +20,7 @@ from backend.application.services.message_router import handle_message
 from backend.config.settings import BackendSettings
 from backend.domain.session import DeviceSession
 from backend.infrastructure.ai.openclawd_gateway import OpenClawdGateway
+from backend.infrastructure.audio.playback_asset_store import PlaybackAssetStore
 from backend.infrastructure.audio.temp_pcm_store import TempPcmAudioStore
 from backend.infrastructure.speech.speech_gateway import SpeechGateway
 from backend.infrastructure.transport.websocket_output import WebSocketOutput
@@ -46,6 +48,7 @@ def create_container() -> AppContainer:
         assistant=OpenClawdGateway(),
         speech=speech_gateway,
         audio_store=TempPcmAudioStore(),
+        playback_asset_store=PlaybackAssetStore(ttl_seconds=settings.playback_asset_ttl_s),
     )
 
     speech_caps = speech_gateway.capabilities()
@@ -75,7 +78,7 @@ def create_container() -> AppContainer:
 
 def create_app() -> tuple[FastAPI, AppContainer]:
     container = create_container()
-    app = FastAPI(title="Simulation Backend", version="0.2.0")
+    app = FastAPI(title="Simulation Backend", version="0.3.0")
     logger = logging.getLogger("simulation-backend")
 
     @app.websocket("/ws")
@@ -116,11 +119,29 @@ def create_app() -> tuple[FastAPI, AppContainer]:
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
-            "protocol_version": "0.2",
+            "protocol_version": "0.3",
             "available_agents": container.settings.available_agents,
             "auth_token_required": bool(container.settings.device_auth_token),
             "audio_reply_mode": container.settings.audio_reply_mode,
             "speech": container.context.speech.capabilities(),
         }
+
+    @app.get("/audio/{audio_id}")
+    async def get_audio_asset(audio_id: str) -> FileResponse:
+        asset = container.context.playback_asset_store.get(audio_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="audio asset not found")
+        return FileResponse(
+            asset.path,
+            media_type="application/octet-stream",
+            filename=f"{audio_id}.pcm",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Audio-Codec": asset.codec,
+                "X-Audio-Sample-Rate": str(asset.sample_rate),
+                "X-Audio-Channels": str(asset.channels),
+                "X-Audio-Expires-At": str(asset.expires_at),
+            },
+        )
 
     return app, container

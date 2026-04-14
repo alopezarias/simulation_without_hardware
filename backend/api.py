@@ -86,6 +86,7 @@ def _sync_runtime_from_legacy_globals() -> None:
         available_agents=list(AVAILABLE_AGENTS) or ["assistant-general"],
         allowed_device_ids=set(ALLOWED_DEVICE_IDS),
         log_level=_container.settings.log_level,
+        playback_asset_ttl_s=_container.settings.playback_asset_ttl_s,
     )
     _container.context.settings = _container.settings
     _container.context.assistant = adapter
@@ -194,7 +195,7 @@ async def transcribe_recording(session: CoreDeviceSession) -> str:
 
 
 async def synthesize_text_to_audio(session: CoreDeviceSession, turn_id: str, text: str) -> bool:
-    """Sintetizar texto a PCM y transmitirlo al dispositivo en streaming."""
+    """Sintetizar texto a PCM y publicar asset descargable para el dispositivo."""
     _sync_runtime_from_legacy_globals()
     return await turn_processing_service.synthesize_text_to_audio(_container.context, session, turn_id, text)
 
@@ -280,7 +281,7 @@ async def health() -> dict[str, Any]:
     _sync_runtime_from_legacy_globals()
     return {
         "status": "ok",
-        "protocol_version": "0.2",
+        "protocol_version": "0.3",
         "available_agents": _container.settings.available_agents,
         "auth_token_required": bool(_container.settings.device_auth_token),
         "audio_reply_mode": _container.settings.audio_reply_mode,

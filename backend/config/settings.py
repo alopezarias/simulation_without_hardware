@@ -23,6 +23,7 @@ class BackendSettings:
     available_agents: list[str]
     allowed_device_ids: set[str]
     log_level: str
+    playback_asset_ttl_s: int
 
     @property
     def agent_catalog_version(self) -> str:
@@ -63,4 +64,5 @@ class BackendSettings:
                 if value.strip()
             },
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            playback_asset_ttl_s=max(1, int(os.getenv("PLAYBACK_ASSET_TTL_S", "600"))),
         )

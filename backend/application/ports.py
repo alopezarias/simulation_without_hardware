@@ -48,3 +48,20 @@ class AudioStorePort(Protocol):
     def close(self, session: "DeviceSession") -> None: ...
 
     def cleanup(self, session: "DeviceSession") -> None: ...
+
+
+class PlaybackAssetStorePort(Protocol):
+    def publish_file(
+        self,
+        source_path: str,
+        *,
+        codec: str,
+        sample_rate: int,
+        channels: int,
+        source: str,
+        loopback: bool,
+    ) -> Any: ...
+
+    def get(self, audio_id: str) -> Any: ...
+
+    def cleanup_expired(self) -> None: ...

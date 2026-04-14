@@ -51,6 +51,7 @@ BACKEND_MESSAGE_TYPES = {
     "assistant.audio.start",
     "assistant.audio.chunk",
     "assistant.audio.end",
+    "assistant.audio.file",
     "incoming_call",
 }
 

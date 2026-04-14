@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi.testclient import TestClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -309,11 +310,10 @@ async def test_interrupt_assistant_cancels_running_task_and_sets_idle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_pcm_audio_file_streams_start_chunk_and_end(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_pcm_audio_file_publishes_audio_file_message() -> None:
     websocket = FakeWebSocket()
     session = make_session(websocket)
     pcm_path = create_temp_pcm(b"\x00\x01" * 900)
-    monkeypatch.setattr(backend.turn_processing_service.asyncio, "sleep", AsyncMock(return_value=None))
     chunks = await backend.stream_pcm_audio_file(
         session,
         turn_id="turn-1",
@@ -322,10 +322,11 @@ async def test_stream_pcm_audio_file_streams_start_chunk_and_end(monkeypatch: py
         channels=1,
         source="tts",
     )
-    assert websocket.sent[0]["type"] == "assistant.audio.start"
-    assert any(message["type"] == "assistant.audio.chunk" for message in websocket.sent)
-    assert websocket.sent[-1]["type"] == "assistant.audio.end"
-    assert chunks >= 1
+    assert websocket.sent[0]["type"] == "assistant.audio.file"
+    assert websocket.sent[0]["audio_id"].startswith("audio-")
+    assert websocket.sent[0]["url"].startswith("/audio/")
+    assert websocket.sent[0]["codec"] == "pcm16"
+    assert chunks == 1
     os.remove(pcm_path)
 
 
@@ -761,6 +762,27 @@ def test_validate_device_message_accepts_new_agent_catalog_requests() -> None:
     assert backend.validate_device_message({"type": "call.start"})["type"] == "call.start"
 
 
+def test_audio_asset_endpoint_serves_published_pcm_file() -> None:
+    pcm_path = create_temp_pcm(b"\x00\x01\x02\x03")
+    asset = backend._container.context.playback_asset_store.publish_file(
+        pcm_path,
+        codec="pcm16",
+        sample_rate=16000,
+        channels=1,
+        source="tts",
+        loopback=False,
+    )
+    client = TestClient(backend.app)
+
+    response = client.get(f"/audio/{asset.audio_id}")
+
+    assert response.status_code == 200
+    assert response.content == b"\x00\x01\x02\x03"
+    assert response.headers["x-audio-codec"] == "pcm16"
+    assert response.headers["x-audio-sample-rate"] == "16000"
+    os.remove(pcm_path)
+
+
 def test_backend_ui_state_contract_stays_remote_only() -> None:
     remote_states = {state.value for state in UiState}
     assert remote_states == {"standby", "listening", "calling", "incoming_call", "config"}
@@ -886,7 +908,7 @@ async def test_health_reports_current_runtime_configuration(monkeypatch: pytest.
     monkeypatch.setattr(backend, "DEVICE_AUTH_TOKEN", "x")
     status = await backend.health()
     assert status["status"] == "ok"
-    assert status["protocol_version"] == "0.2"
+    assert status["protocol_version"] == "0.3"
     assert status["available_agents"] == ["assistant-general"]
     assert status["audio_reply_mode"] == "assistant"
     assert status["auth_token_required"] is True

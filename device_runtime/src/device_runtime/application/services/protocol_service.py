@@ -62,6 +62,9 @@ class ProtocolService:
         if message_type == "assistant.audio.start":
             current.playback_active = True
             return ProtocolUpdate(snapshot=current, note="assistant audio started")
+        if message_type == "assistant.audio.file":
+            current.playback_active = True
+            return ProtocolUpdate(snapshot=current, note="assistant audio file queued")
         if message_type == "assistant.audio.end":
             current.playback_active = False
             if current.device_state == DeviceState.CALLING:

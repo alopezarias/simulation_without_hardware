@@ -8,6 +8,8 @@ import copy
 from dataclasses import dataclass
 import time
 from typing import Any
+from urllib.parse import urljoin, urlparse
+from urllib.request import urlopen
 
 from device_runtime.application.ports import BackendGateway, PowerStatus, StateObserver
 from device_runtime.application.services.device_controller import DeviceController
@@ -99,6 +101,7 @@ class RuntimeRunner:
         self._queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self._transport_task: asyncio.Task[None] | None = None
         self._observer = RuntimeObserver(runtime)
+        self._playback_task: asyncio.Task[None] | None = None
         self._controller = DeviceController(
             runtime.snapshot,
             gateway=build_gateway(runtime, self.transport),
@@ -143,6 +146,14 @@ class RuntimeRunner:
     async def stop(self) -> None:
         self.runtime.button.stop()
         self.runtime.audio_capture.stop()
+        playback_task = self._playback_task
+        if playback_task is not None and not playback_task.done():
+            playback_task.cancel()
+            try:
+                await playback_task
+            except asyncio.CancelledError:
+                pass
+        self._playback_task = None
         self.runtime.audio_playback.stop(clear_buffer=False)
         self.transport.close()
         task = self._transport_task
@@ -189,6 +200,12 @@ class RuntimeRunner:
         playback = self.runtime.audio_playback
         if not getattr(playback, "available", False):
             return
+        if message_type == "assistant.audio.file":
+            playback_task = self._playback_task
+            if playback_task is not None and not playback_task.done():
+                playback_task.cancel()
+            self._playback_task = asyncio.create_task(self._play_audio_file(message))
+            return
         if message_type == "assistant.audio.start":
             sample_rate = _safe_int(message.get("sample_rate"), self.runtime.config.audio_sample_rate)
             channels = _safe_int(message.get("channels"), self.runtime.config.audio_channels)
@@ -217,6 +234,68 @@ class RuntimeRunner:
             end_session = getattr(playback, "end_session", None)
             if callable(end_session):
                 end_session()
+
+    async def _play_audio_file(self, message: dict[str, Any]) -> None:
+        playback = self.runtime.audio_playback
+        codec = str(message.get("codec", "")).strip().lower()
+        if codec != "pcm16":
+            self._record_warning(f"assistant.audio.file unsupported codec: {codec or 'unknown'}")
+            self._mark_playback_finished("assistant audio file failed")
+            return
+
+        url = self._resolve_audio_url(message)
+        if not url:
+            self._record_warning("assistant.audio.file missing url")
+            self._mark_playback_finished("assistant audio file failed")
+            return
+
+        sample_rate = _safe_int(message.get("sample_rate"), self.runtime.config.audio_sample_rate)
+        channels = _safe_int(message.get("channels"), self.runtime.config.audio_channels)
+        try:
+            pcm_bytes = await asyncio.to_thread(self._download_audio_bytes, url)
+            if not pcm_bytes:
+                self._record_warning("assistant.audio.file empty")
+                self._mark_playback_finished("assistant audio file empty")
+                return
+            playback.start(sample_rate=sample_rate, channels=channels)
+            playback.push(pcm_bytes)
+            end_session = getattr(playback, "end_session", None)
+            if callable(end_session):
+                end_session()
+            self._mark_playback_finished("assistant audio file played")
+        except asyncio.CancelledError:
+            playback.stop(clear_buffer=True)
+            self._mark_playback_finished("assistant audio file cancelled")
+            raise
+        except Exception as exc:
+            playback.stop(clear_buffer=True)
+            self._record_warning(f"assistant.audio.file download failed: {exc}")
+            self._mark_playback_finished("assistant audio file failed")
+
+    def _resolve_audio_url(self, message: dict[str, Any]) -> str:
+        raw_url = str(message.get("url", "")).strip()
+        if not raw_url:
+            return ""
+        parsed = urlparse(raw_url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return raw_url
+        base = urlparse(self.runtime.config.ws_url)
+        http_scheme = "https" if base.scheme == "wss" else "http"
+        origin = f"{http_scheme}://{base.netloc}"
+        return urljoin(origin, raw_url)
+
+    def _download_audio_bytes(self, url: str) -> bytes:
+        with urlopen(url, timeout=30) as response:  # noqa: S310
+            return response.read()
+
+    def _mark_playback_finished(self, note: str) -> None:
+        snapshot = copy.deepcopy(self._controller.snapshot)
+        snapshot.playback_active = False
+        if snapshot.device_state == DeviceState.CALLING:
+            snapshot.device_state = DeviceState.STANDBY
+            snapshot.remote_ui_state = UiState.STANDBY
+        snapshot.diagnostics.last_note = note
+        self._controller.replace_snapshot(snapshot)
 
     def _record_warning(self, warning: str) -> None:
         snapshot = copy.deepcopy(self._controller.snapshot)

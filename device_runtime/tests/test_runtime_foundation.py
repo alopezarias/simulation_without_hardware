@@ -371,6 +371,30 @@ class AudioTransport(FakeTransport):
             await asyncio.sleep(0.01)
 
 
+class AudioFileTransport(FakeTransport):
+    async def connect(self) -> None:
+        assert self.connection_handler is not None
+        assert self.message_handler is not None
+        self.connection_handler("connected", None)
+        self.message_handler(build_message("session.ready", session_id="session-1"))
+        self.message_handler(
+            build_message(
+                "assistant.audio.file",
+                audio_id="audio-1",
+                url="/audio/audio-1",
+                codec="pcm16",
+                sample_rate=24000,
+                channels=1,
+                size_bytes=6,
+                source="tts",
+                loopback=False,
+                expires_at=9999999999,
+            )
+        )
+        while not self.closed:
+            await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_runtime_runner_keeps_entrypoint_alive_until_stopped() -> None:
     stop_event = asyncio.Event()
@@ -424,3 +448,40 @@ async def test_runtime_runner_routes_assistant_audio_chunks_to_playback() -> Non
 
     assert playback.started_with == (22050, 1)
     assert playback.pushed == [b"pcm"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_runner_downloads_audio_file_and_routes_pcm_to_playback() -> None:
+    runtime = build_runtime({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "ws://localhost/ws"})
+    playback = FakePlayback()
+    stop_event = asyncio.Event()
+    runner = RuntimeRunner(
+        RuntimeBootstrap(
+            config=runtime.config,
+            snapshot=runtime.snapshot,
+            display=NullDisplay(),
+            button=NullButton(),
+            audio_capture=NullAudioCapture(),
+            audio_playback=playback,
+            power=NullPowerStatus(),
+            rgb=NullRgb(),
+            diagnostics=NullDiagnostics(),
+        ),
+        transport=AudioFileTransport(),
+    )
+
+    async def fake_play_audio_file(message):
+        playback.start(sample_rate=message["sample_rate"], channels=message["channels"])
+        playback.push(b"pcmraw")
+        playback.end_session()
+        runner._mark_playback_finished("assistant audio file played")
+
+    runner._play_audio_file = fake_play_audio_file  # type: ignore[method-assign]
+
+    task = asyncio.create_task(runner.run(stop_event=stop_event))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert playback.started_with == (24000, 1)
+    assert playback.pushed == [b"pcmraw"]
