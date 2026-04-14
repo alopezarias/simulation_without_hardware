@@ -40,6 +40,7 @@ class GpioButton:
         self._single_press_timer: Any | None = None
         self._last_press_at: float | None = None
         self._long_press_emitted = False
+        self._pressed = False
         self.started = False
 
     @property
@@ -62,9 +63,12 @@ class GpioButton:
             button.hold_time = self._long_press_s
         if hasattr(button, "when_held"):
             button.when_held = self._handle_long_press
+        if hasattr(button, "when_released"):
+            button.when_released = self._handle_release
         self._cancel_single_press_timer()
         self._last_press_at = None
         self._long_press_emitted = False
+        self._pressed = False
         self.started = True
 
     def stop(self) -> None:
@@ -72,6 +76,7 @@ class GpioButton:
         self._cancel_single_press_timer()
         self._last_press_at = None
         self._long_press_emitted = False
+        self._pressed = False
         if self._button is not None and hasattr(self._button, "close"):
             self._button.close()
         self._button = None
@@ -87,6 +92,7 @@ class GpioButton:
     def _handle_press(self) -> None:
         if not self.started:
             return
+        self._pressed = True
         now = self._clock()
         if self._single_press_timer is not None and self._last_press_at is not None:
             if now - self._last_press_at <= self._double_press_s:
@@ -110,9 +116,20 @@ class GpioButton:
         self._last_press_at = None
         self._emit("long_press")
 
+    def _handle_release(self) -> None:
+        if not self.started or not self._pressed:
+            return
+        self._pressed = False
+        if self._long_press_emitted:
+            self._long_press_emitted = False
+            self._emit("release")
+
     def _emit_single_press(self) -> None:
+        last_press_at = self._last_press_at
         self._single_press_timer = None
         self._last_press_at = None
+        if last_press_at is None:
+            return
         if self._long_press_emitted:
             self._long_press_emitted = False
             return

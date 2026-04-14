@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from device_runtime.application.ports import PowerStatus
 from device_runtime.domain.events import DeviceState
 from device_runtime.domain.state import DeviceSnapshot
-from device_runtime.protocol import UiState
 
 
 @dataclass(slots=True)
@@ -87,54 +86,32 @@ class DisplayModelService:
     def _scene(self, snapshot: DeviceSnapshot) -> str:
         if not snapshot.connected:
             return "disconnected"
-        if snapshot.diagnostics.last_error or snapshot.remote_ui_state == UiState.ERROR:
+        if snapshot.diagnostics.last_error:
             return "error"
-        if snapshot.device_state == DeviceState.LOCKED:
-            return "locked"
-        if snapshot.device_state == DeviceState.AGENTS:
-            return "agent-selection"
-        if snapshot.device_state == DeviceState.MODE:
-            return "mode-selection"
-        if snapshot.device_state == DeviceState.MENU:
-            return "menu"
-        if snapshot.device_state == DeviceState.LISTEN or snapshot.listening_active:
+        if snapshot.device_state == DeviceState.LISTENING or snapshot.listening_active:
             return "listening"
-        if snapshot.remote_ui_state == UiState.SPEAKING:
-            return "speaking"
-        if snapshot.remote_ui_state == UiState.PROCESSING:
-            return "processing"
-        return "ready"
+        if snapshot.device_state == DeviceState.CALLING:
+            return "calling"
+        if snapshot.device_state == DeviceState.INCOMING_CALL:
+            return "incoming-call"
+        if snapshot.device_state == DeviceState.CONFIG:
+            return "config"
+        return "standby"
 
     def _status_copy(self, scene: str, snapshot: DeviceSnapshot) -> tuple[str, str]:
         mapping = {
-            "locked": ("Locked", "Hold to unlock"),
-            "ready": ("Ready", "Press to talk"),
-            "listening": ("Listening", "Release send / dbl cancel"),
-            "processing": ("Thinking", "Working on your reply"),
-            "speaking": ("Speaking", "Assistant reply live"),
-            "menu": ("Menu", "Browse local actions"),
-            "mode-selection": ("Mode", "Pick and hold"),
-            "agent-selection": ("Agent", "Pick and hold"),
+            "standby": ("Standby", "Hold to talk / press to call"),
+            "listening": ("Listening", "Release to send"),
+            "calling": ("Llamando", "Waiting for backend greeting"),
+            "incoming-call": ("Incoming call", "Hold to answer"),
+            "config": ("Config", "Local settings"),
             "disconnected": ("Offline", "Reconnect to the PC backend"),
             "error": ("Attention", snapshot.diagnostics.last_error or "Backend reported an error"),
         }
-        status_text, status_detail = mapping.get(scene, ("Ready", "Press to speak"))
-        if scene == "agent-selection" and snapshot.focused_agent:
-            status_detail = f"Focus {snapshot.focused_agent}"
-        if scene == "mode-selection":
-            status_detail = f"Mode {snapshot.navigation.available_modes[snapshot.navigation.mode_index % len(snapshot.navigation.available_modes or [snapshot.navigation.active_mode])] if snapshot.navigation.available_modes or snapshot.navigation.active_mode else 'conversation'}"
-        return status_text, status_detail
+        return mapping.get(scene, ("Standby", "Hold to talk / press to call"))
 
     def _focus_label(self, snapshot: DeviceSnapshot) -> str:
-        if snapshot.device_state == DeviceState.MENU:
-            options = snapshot.navigation.menu_options or ["-"]
-            return options[snapshot.navigation.menu_index % len(options)]
-        if snapshot.device_state == DeviceState.MODE:
-            modes = snapshot.navigation.available_modes or [snapshot.navigation.active_mode]
-            return modes[snapshot.navigation.mode_index % len(modes)]
-        if snapshot.device_state == DeviceState.AGENTS:
-            return snapshot.focused_agent or "-"
-        return snapshot.navigation.active_mode or "-"
+        return snapshot.device_state.value
 
     def _transcript_label(self, scene: str) -> str:
         if scene == "listening":
@@ -142,20 +119,19 @@ class DisplayModelService:
         return "YOU"
 
     def _assistant_label(self, scene: str) -> str:
-        if scene == "processing":
-            return "BACKEND"
+        if scene in {"calling", "incoming-call"}:
+            return "CALL"
         return "ASSISTANT"
 
     def _transcript_preview(self, snapshot: DeviceSnapshot, scene: str) -> str:
         if snapshot.transcript.strip():
             return self._compact(snapshot.transcript, limit=72)
         prompts = {
-            "locked": "Hold the button to wake.",
-            "ready": "Tap and start speaking.",
+            "standby": "Hold to talk or press to call.",
             "listening": "Mic is open.",
-            "menu": "Pick the next local action.",
-            "mode-selection": "Tap to move, hold to keep.",
-            "agent-selection": "Tap to browse the agent list.",
+            "calling": "Calling the backend.",
+            "incoming-call": "Backend is calling you.",
+            "config": "Configuration mode.",
             "disconnected": "Waiting for network and backend.",
         }
         return prompts.get(scene, "Waiting for transcript...")
@@ -164,8 +140,9 @@ class DisplayModelService:
         if snapshot.assistant_text.strip():
             return self._compact(snapshot.assistant_text, limit=84)
         prompts = {
-            "processing": "Backend is preparing the answer.",
-            "speaking": "Reply audio is streaming.",
+            "calling": "Greeting audio will play here.",
+            "incoming-call": "Distinct ringing/call audio is active.",
+            "config": "Config flow remains intentionally minimal.",
             "disconnected": "Responses resume after reconnect.",
             "error": snapshot.diagnostics.last_error or "Runtime needs attention.",
         }
@@ -185,9 +162,7 @@ class DisplayModelService:
 
     def _header_badges(self, snapshot: DeviceSnapshot, power: PowerStatus) -> list[str]:
         badges = [self._network_label(snapshot), self._battery_label(power)]
-        if snapshot.pending_agent_ack:
-            badges.append("AGENT PENDING")
-        elif snapshot.active_agent:
+        if snapshot.active_agent:
             badges.append(snapshot.active_agent.upper())
         return badges
 
@@ -213,24 +188,17 @@ class DisplayModelService:
         diagnostics_label: str,
     ) -> tuple[str, str, str]:
         active_agent = snapshot.active_agent.replace("assistant-", "").replace("-", " ").strip() or "assistant"
-        if scene == "locked":
-            return ("Hold to wake", active_agent.title(), network_label)
-        if scene == "ready":
-            return ("Press to talk", active_agent.title(), network_label)
+        if scene == "standby":
+            return ("Standby", active_agent.title(), "Hold to talk")
         if scene == "listening":
             title = transcript_preview if snapshot.transcript.strip() else "Listening now"
             return (title, status_detail, active_agent.title())
-        if scene == "processing":
-            return (assistant_preview, active_agent.title(), "Reply on the way")
-        if scene == "speaking":
-            return (assistant_preview, active_agent.title(), "Audio playing")
-        if scene == "menu":
-            return (snapshot.focused_agent or self._focus_label(snapshot).title(), status_detail, "Tap browse / dbl exit")
-        if scene == "mode-selection":
-            return (self._focus_label(snapshot).title(), "Mode selection", status_detail)
-        if scene == "agent-selection":
-            count = len(snapshot.agents) or 1
-            return (self._focus_label(snapshot), f"Agent {snapshot.agent_index + 1}/{count}", status_detail)
+        if scene == "calling":
+            return ("Llamando", assistant_preview, "Return to standby after playback")
+        if scene == "incoming-call":
+            return ("Incoming call", status_detail, "Hold to talk")
+        if scene == "config":
+            return ("Config", status_detail, "Incoming call preempts")
         if scene == "disconnected":
             return ("Backend offline", "Check Wi-Fi or DEVICE_WS_URL", diagnostics_label)
         if scene == "error":

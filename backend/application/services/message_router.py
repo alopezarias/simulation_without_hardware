@@ -10,6 +10,7 @@ from typing import Any
 from backend.shared.protocol import UiState, build_message, require_fields
 
 from backend.application.context import AppContext
+from backend.application.services.call_flow import start_outbound_call
 from backend.application.services.message_bus import send, send_error, send_ui_state
 from backend.application.services.recording import cancel_recording, interrupt_assistant, start_recording
 from backend.application.services.session_init import complete_hello, ensure_authenticated, send_session_ready
@@ -33,6 +34,10 @@ async def handle_message(ctx: AppContext, session: DeviceSession, message: dict[
 
     if message_type == "session.start":
         await send_session_ready(ctx, session)
+        return
+
+    if message_type == "call.start":
+        await start_outbound_call(ctx, session, message)
         return
 
     if message_type == "agents.version.request":
@@ -71,7 +76,7 @@ async def handle_message(ctx: AppContext, session: DeviceSession, message: dict[
 
         session.active_agent = requested
         await send(session, build_message("agent.selected", agent_id=session.active_agent))
-        await send_ui_state(session, UiState.IDLE)
+        await send_ui_state(session, UiState.STANDBY)
         return
 
     if message_type == "recording.start":
@@ -149,7 +154,7 @@ async def handle_message(ctx: AppContext, session: DeviceSession, message: dict[
 
         ctx.audio_store.close(session)
         session.recording = False
-        await send_ui_state(session, UiState.PROCESSING)
+        await send_ui_state(session, UiState.STANDBY)
 
         if session.response_task and not session.response_task.done():
             session.response_task.cancel()

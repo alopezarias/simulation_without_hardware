@@ -47,7 +47,7 @@ async def cancel_recording(ctx: AppContext, session: DeviceSession) -> None:
     session.audio_chunks_received = 0
     session.audio_bytes_received = 0
     ctx.audio_store.cleanup(session)
-    await send_ui_state(session, UiState.IDLE)
+    await send_ui_state(session, UiState.STANDBY)
 
 
 async def interrupt_assistant(session: DeviceSession) -> None:
@@ -60,4 +60,4 @@ async def interrupt_assistant(session: DeviceSession) -> None:
         except asyncio.CancelledError:
             pass
 
-    await send_ui_state(session, UiState.IDLE)
+    await send_ui_state(session, UiState.STANDBY)

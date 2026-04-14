@@ -63,7 +63,7 @@ class DeviceController:
         self._publish()
 
     async def flush_audio_capture(self, capture: AudioCapturePort, *, max_chunks: int = 6) -> int:
-        if self._snapshot.device_state != DeviceState.LISTEN:
+        if self._snapshot.device_state != DeviceState.LISTENING:
             return 0
         if not self._snapshot.turn_id or not capture.available:
             return 0
@@ -99,15 +99,5 @@ class DeviceController:
             if isinstance(turn_id, str) and turn_id:
                 await self._gateway.stop_listen(turn_id)
             return
-        if effect.kind == DomainEffect.STOP_LISTEN_CANCEL:
-            turn_id = effect.data.get("turn_id")
-            await self._gateway.cancel_listen(turn_id if isinstance(turn_id, str) and turn_id else None)
-            return
-        if effect.kind == DomainEffect.REQUEST_AGENTS_VERSION:
-            await self._gateway.request_agents_version()
-            return
-        if effect.kind == DomainEffect.REQUEST_AGENTS_LIST:
-            await self._gateway.request_agents_list()
-            return
-        if effect.kind == DomainEffect.CONFIRM_AGENT:
-            await self._gateway.confirm_agent(str(effect.data["agent_id"]))
+        if effect.kind == DomainEffect.START_CALL:
+            await self._gateway.start_call()

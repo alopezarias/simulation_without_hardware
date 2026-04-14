@@ -17,7 +17,7 @@ class DeviceSession:
     session_id: str = field(default_factory=new_session_id)
     device_id: str = "unknown-device"
     active_agent: str = "assistant-general"
-    ui_state: UiState = UiState.IDLE
+    ui_state: UiState = UiState.STANDBY
     recording: bool = False
     turn_id: str | None = None
     text_fragments: list[str] = field(default_factory=list)

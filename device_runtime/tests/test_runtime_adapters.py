@@ -17,7 +17,7 @@ from device_runtime.application.services.display_model_service import DisplayMod
 from device_runtime.application.services.device_controller import DeviceController
 from device_runtime.application.services.experience_service import ExperienceService
 from device_runtime.application.services.rgb_policy_service import RgbPolicyService
-from device_runtime.domain.events import DeviceState
+from device_runtime.domain.events import DeviceInputEvent, DeviceState
 from device_runtime.domain.state import DeviceSnapshot
 from device_runtime.entrypoints.raspi_main import build_runtime
 from device_runtime.infrastructure.audio.alsa_capture import AlsaCapture
@@ -52,17 +52,11 @@ class FakeGateway:
     async def cancel_listen(self, turn_id: str | None) -> None:
         self.sent.append({"type": "recording.cancel", "turn_id": turn_id})
 
+    async def start_call(self) -> None:
+        self.sent.append({"type": "call.start"})
+
     async def send_audio_chunk(self, turn_id: str, chunk: dict[str, Any]) -> None:
         self.sent.append({"type": "audio.chunk", "turn_id": turn_id, **chunk})
-
-    async def request_agents_version(self) -> None:
-        self.sent.append({"type": "agents.version.request"})
-
-    async def request_agents_list(self) -> None:
-        self.sent.append({"type": "agents.list.request"})
-
-    async def confirm_agent(self, agent_id: str) -> None:
-        self.sent.append({"type": "agent.select", "agent_id": agent_id})
 
 
 class FakeRoot:
@@ -171,6 +165,7 @@ class FakeButtonDevice:
         self.bounce_time = bounce_time
         self.when_pressed: Any = None
         self.when_held: Any = None
+        self.when_released: Any = None
         self.hold_time: float | None = None
         self.closed = False
 
@@ -197,10 +192,12 @@ def test_keyboard_button_binds_default_keys_and_dispatches() -> None:
 
     adapter.start(events.append)
     adapter.bind_default_keys()
-    root.bound["<space>"](None)
+    root.bound["<KeyPress-space>"](None)
+    root.bound["<KeyRelease-space>"](None)
+    root.bound["<Return>"](None)
     root.bound["<Escape>"](None)
 
-    assert events == ["press", "long_press"]
+    assert events == ["long_press", "release", "press", "double_press"]
 
 
 def test_gpio_button_emits_single_press_after_timer() -> None:
@@ -267,9 +264,11 @@ def test_gpio_button_cancels_pending_press_when_long_press_arrives() -> None:
     created[0].when_pressed()
     assert created[0].when_held is not None
     created[0].when_held()
+    assert created[0].when_released is not None
+    created[0].when_released()
     timers[0].callback()
 
-    assert events == ["long_press"]
+    assert events == ["long_press", "release"]
 
 
 def test_whisplay_button_emits_single_press_after_release_timer() -> None:
@@ -324,7 +323,7 @@ def test_whisplay_button_emits_long_press_without_followup_click() -> None:
     timers[0].callback()
     board.release()
 
-    assert events == ["long_press"]
+    assert events == ["long_press", "release"]
 
 
 def test_whisplay_display_uses_injected_driver_double() -> None:
@@ -477,7 +476,7 @@ def test_whisplay_display_loads_vendor_whisplay_board_from_driver_path(tmp_path:
 
 
 def test_display_model_service_surfaces_disconnected_battery_unavailable_copy() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     snapshot.connected = False
     snapshot.diagnostics.transport_status = "disconnected"
 
@@ -489,14 +488,14 @@ def test_display_model_service_surfaces_disconnected_battery_unavailable_copy() 
     assert model.diagnostics_label == "PiSugar unavailable"
 
 
-def test_experience_service_and_rgb_policy_align_on_speaking_state() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+def test_experience_service_and_rgb_policy_align_on_incoming_call_state() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.INCOMING_CALL)
     snapshot.connected = True
-    snapshot.remote_ui_state = UiState.SPEAKING
+    snapshot.remote_ui_state = UiState.INCOMING_CALL
 
     experience = ExperienceService().build(snapshot, PowerStatus(88.0, False, "pisugar", True, "ok"))
 
-    assert experience.screen.scene == "speaking"
+    assert experience.screen.scene == "incoming-call"
     assert experience.rgb_signal == RgbPolicyService().select(snapshot, experience.power)
 
 
@@ -700,7 +699,7 @@ def test_raspi_bootstrap_degrades_missing_real_adapters_without_import_failures(
 
 
 async def test_null_audio_capture_keeps_runtime_smoke_safe() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.LISTEN)
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.LISTENING)
     snapshot.connected = True
     snapshot.turn_id = "turn-1"
     gateway = FakeGateway()
@@ -710,3 +709,57 @@ async def test_null_audio_capture_keeps_runtime_smoke_safe() -> None:
 
     assert sent == 0
     assert gateway.sent == []
+
+
+async def test_device_controller_hold_to_talk_starts_on_hold_and_stops_on_release() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
+    snapshot.connected = True
+    snapshot.session_id = "session-1"
+    gateway = FakeGateway()
+    controller = DeviceController(snapshot, gateway=gateway, clock=FakeClock())
+
+    started = await controller.handle_input(DeviceInputEvent.LONG_PRESS)
+    finished = await controller.handle_input(DeviceInputEvent.RELEASE)
+
+    assert started.snapshot.device_state == DeviceState.LISTENING
+    assert started.snapshot.listening_active is True
+    assert gateway.sent[0]["type"] == "recording.start"
+    assert finished.snapshot.device_state == DeviceState.STANDBY
+    assert finished.snapshot.listening_active is False
+    assert gateway.sent[1]["type"] == "recording.stop"
+
+
+async def test_device_controller_single_press_starts_call_and_audio_end_returns_to_standby() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
+    snapshot.connected = True
+    snapshot.session_id = "session-1"
+    gateway = FakeGateway()
+    controller = DeviceController(snapshot, gateway=gateway, clock=FakeClock())
+
+    started = await controller.handle_input(DeviceInputEvent.PRESS)
+    await controller.handle_backend_message({"type": "assistant.audio.start"})
+    ended = await controller.handle_backend_message({"type": "assistant.audio.end"})
+
+    assert started.snapshot.device_state == DeviceState.CALLING
+    assert gateway.sent == [{"type": "call.start"}]
+    assert ended.snapshot.device_state == DeviceState.STANDBY
+    assert ended.snapshot.playback_active is False
+
+
+async def test_incoming_call_preempts_config_and_hold_to_talk_still_works() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
+    snapshot.connected = True
+    snapshot.session_id = "session-1"
+    gateway = FakeGateway()
+    controller = DeviceController(snapshot, gateway=gateway, clock=FakeClock())
+
+    config = await controller.handle_input(DeviceInputEvent.DOUBLE_PRESS)
+    incoming = await controller.handle_backend_message({"type": "incoming_call"})
+    listening = await controller.handle_input(DeviceInputEvent.LONG_PRESS)
+    released = await controller.handle_input(DeviceInputEvent.RELEASE)
+
+    assert config.snapshot.device_state == DeviceState.CONFIG
+    assert incoming.snapshot.device_state == DeviceState.INCOMING_CALL
+    assert listening.snapshot.device_state == DeviceState.LISTENING
+    assert released.snapshot.device_state == DeviceState.STANDBY
+    assert [message["type"] for message in gateway.sent] == ["recording.start", "recording.stop"]

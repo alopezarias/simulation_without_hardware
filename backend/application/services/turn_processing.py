@@ -260,8 +260,6 @@ async def process_turn(ctx: AppContext, session: DeviceSession) -> None:
         session,
         build_message("assistant.start", turn_id=turn_id, agent_id=session.active_agent),
     )
-    await send_ui_state(session, UiState.SPEAKING)
-
     collected_chunks: list[str] = []
     loopback_used = False
     tts_used = False
@@ -411,4 +409,4 @@ async def process_turn(ctx: AppContext, session: DeviceSession) -> None:
         session.audio_chunks_received = 0
         session.audio_bytes_received = 0
         ctx.audio_store.cleanup(session)
-        await send_ui_state(session, UiState.IDLE)
+        await send_ui_state(session, UiState.STANDBY)

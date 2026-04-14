@@ -62,7 +62,7 @@ class RuntimeObserver(StateObserver):
         self._was_listening = False
 
     def publish(self, snapshot: DeviceSnapshot) -> None:
-        listening = snapshot.device_state == DeviceState.LISTEN and snapshot.listening_active
+        listening = snapshot.device_state == DeviceState.LISTENING and snapshot.listening_active
         if listening and not self._was_listening:
             if getattr(self._runtime.audio_capture, "available", False):
                 self._runtime.audio_capture.start()
@@ -128,6 +128,8 @@ class RuntimeRunner:
                     await self._controller.flush_audio_capture(self.runtime.audio_capture)
                     continue
                 if event_type == "button":
+                    if payload == DeviceInputEvent.RELEASE:
+                        await self._controller.flush_audio_capture(self.runtime.audio_capture)
                     await self._controller.handle_input(payload)
                 elif event_type == "backend":
                     await self._controller.handle_backend_message(payload)
@@ -172,11 +174,12 @@ class RuntimeRunner:
         snapshot.connected = status == "connected"
         if status == "disconnected":
             snapshot.session_id = ""
-            snapshot.remote_ui_state = UiState.IDLE
+            snapshot.remote_ui_state = UiState.STANDBY
             snapshot.listening_active = False
+            snapshot.playback_active = False
             snapshot.turn_id = None
-            if snapshot.device_state == DeviceState.LISTEN:
-                snapshot.device_state = DeviceState.READY
+            if snapshot.device_state == DeviceState.LISTENING:
+                snapshot.device_state = DeviceState.STANDBY
             if detail:
                 snapshot.diagnostics.last_error = detail
         self._controller.replace_snapshot(snapshot)
@@ -249,17 +252,12 @@ class RuntimeTransportGateway(BackendGateway):
             payload["turn_id"] = turn_id
         await self._transport.send(build_message(MessageType.RECORDING_CANCEL, **payload))
 
+    async def start_call(self) -> None:
+        await self._transport.send(build_message(MessageType.CALL_START))
+
     async def send_audio_chunk(self, turn_id: str, chunk: dict[str, Any]) -> None:
         await self._transport.send(build_message(MessageType.AUDIO_CHUNK, turn_id=turn_id, **chunk))
 
-    async def request_agents_version(self) -> None:
-        await self._transport.send(build_message(MessageType.AGENTS_VERSION_REQUEST))
-
-    async def request_agents_list(self) -> None:
-        await self._transport.send(build_message(MessageType.AGENTS_LIST_REQUEST))
-
-    async def confirm_agent(self, agent_id: str) -> None:
-        await self._transport.send(build_message(MessageType.AGENT_SELECT, agent_id=agent_id))
 
 
 def build_runtime(env: dict[str, str] | None = None) -> RuntimeBootstrap:

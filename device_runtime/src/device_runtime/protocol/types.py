@@ -8,16 +8,17 @@ from enum import Enum
 class UiState(str, Enum):
     """Main UI states consumed by the runtime."""
 
-    IDLE = "idle"
+    STANDBY = "standby"
     LISTENING = "listening"
-    PROCESSING = "processing"
-    SPEAKING = "speaking"
-    ERROR = "error"
+    CALLING = "calling"
+    INCOMING_CALL = "incoming_call"
+    CONFIG = "config"
 
 
 class MessageType(str, Enum):
     DEVICE_HELLO = "device.hello"
     SESSION_START = "session.start"
+    CALL_START = "call.start"
     AGENT_SELECT = "agent.select"
     AGENTS_VERSION_REQUEST = "agents.version.request"
     AGENTS_LIST_REQUEST = "agents.list.request"

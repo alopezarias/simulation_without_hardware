@@ -94,5 +94,5 @@ async def complete_hello(
         session.active_agent = requested_agent
 
     await send_session_ready(ctx, session)
-    await send_ui_state(session, UiState.IDLE)
+    await send_ui_state(session, UiState.STANDBY)
     return True

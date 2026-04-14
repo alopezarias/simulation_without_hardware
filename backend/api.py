@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from backend.application.services import message_bus as message_bus_service
+from backend.application.services import call_flow as call_flow_service
 from backend.application.services import message_router as message_router_service
 from backend.application.services import recording as recording_service
 from backend.application.services import session_init as session_init_service
@@ -27,6 +28,7 @@ ENABLE_FAKE_AUDIO = _container.settings.enable_fake_audio
 LOOPBACK_AUDIO_ENABLED = _container.settings.loopback_audio_enabled
 LOOPBACK_CHUNK_MS = _container.settings.loopback_chunk_ms
 AUDIO_REPLY_MODE = _container.settings.audio_reply_mode
+OUTBOUND_CALL_GREETING = _container.settings.outbound_call_greeting
 DEVICE_AUTH_TOKEN = _container.settings.device_auth_token
 AVAILABLE_AGENTS = list(_container.settings.available_agents)
 ALLOWED_DEVICE_IDS = set(_container.settings.allowed_device_ids)
@@ -79,6 +81,7 @@ def _sync_runtime_from_legacy_globals() -> None:
         loopback_audio_enabled=LOOPBACK_AUDIO_ENABLED,
         loopback_chunk_ms=LOOPBACK_CHUNK_MS,
         audio_reply_mode=AUDIO_REPLY_MODE,
+        outbound_call_greeting=OUTBOUND_CALL_GREETING,
         device_auth_token=DEVICE_AUTH_TOKEN,
         available_agents=list(AVAILABLE_AGENTS) or ["assistant-general"],
         allowed_device_ids=set(ALLOWED_DEVICE_IDS),
@@ -200,6 +203,28 @@ async def process_turn(session: CoreDeviceSession) -> None:
     """Orquestar turno completo: transcript, respuesta, TTS/loopback y cierre."""
     _sync_runtime_from_legacy_globals()
     await turn_processing_service.process_turn(_container.context, session)
+
+
+async def start_outbound_call(session: CoreDeviceSession, message: dict[str, Any]) -> None:
+    """Start the simplified single-click outbound call flow."""
+    _sync_runtime_from_legacy_globals()
+    await call_flow_service.start_outbound_call(_container.context, session, message)
+
+
+async def send_incoming_call(
+    session: CoreDeviceSession,
+    *,
+    call_id: str | None = None,
+    from_backend: str = "backend",
+    title: str = "Llamada entrante",
+) -> None:
+    """Emit a backend-initiated incoming-call semantic to the device."""
+    await call_flow_service.send_incoming_call(
+        session,
+        call_id=call_id,
+        from_backend=from_backend,
+        title=title,
+    )
 
 
 async def send_session_ready(session: CoreDeviceSession) -> None:

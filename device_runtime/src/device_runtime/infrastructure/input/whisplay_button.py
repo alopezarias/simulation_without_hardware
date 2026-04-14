@@ -97,6 +97,7 @@ class WhisplayButton:
             if self._long_press_emitted:
                 self._long_press_emitted = False
                 self._last_release_at = None
+                self._emit("release")
                 return
             now = self._clock()
             if self._click_timer is not None and self._last_release_at is not None:

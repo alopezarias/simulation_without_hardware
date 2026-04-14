@@ -1,309 +1,108 @@
-# Máquina de Estados del Dispositivo Conversacional
+# Maquina de Estados del Dispositivo Conversacional
 
-## 1. Propósito del documento
+## 1. Proposito del documento
 
-Este documento define la máquina de estados del dispositivo
-conversacional del proyecto.
+Este documento define la maquina de estados visible del dispositivo para el modelo simplificado aprobado en `docs/functional_spec_simplified_device_interaction.md` y `docs/adr/ADR-0003-simplified-device-interaction-model.md`.
 
-Describe:
+Reemplaza la semantica anterior basada en `LOCKED`, `READY`, `LISTEN`, `MENU`, `MODE` y `AGENTS` como modelo canonico de interaccion.
 
--   los estados posibles del sistema
--   los eventos de interacción del usuario
--   las transiciones entre estados
--   las acciones asociadas a cada transición
+## 2. Eventos de entrada
 
-Este documento forma parte de la **configuración base del proyecto** y
-sirve como referencia para:
+El dispositivo dispone de un unico boton fisico y se consideran tres gestos funcionales:
 
--   implementación del firmware
--   lógica de control del botón
--   interfaz de usuario
--   comportamiento general del sistema
+| Gesto | Descripcion |
+| --- | --- |
+| `single_click` | Pulsacion corta y liberacion rapida |
+| `double_click` | Dos pulsaciones cortas consecutivas |
+| `press_hold` / `release` | Presion sostenida que activa escucha mientras se mantiene, y liberacion que finaliza captura |
 
-------------------------------------------------------------------------
+## 3. Estados visibles canonicos
 
-# 2. Eventos de entrada
+| Estado | Descripcion |
+| --- | --- |
+| `standby` | Dispositivo encendido, ocioso y listo |
+| `listening` | Captura de audio activa solo mientras el boton sigue presionado |
+| `calling` | Inicio breve de llamada saliente; la pantalla muestra `llamando` |
+| `incoming_call` | Llamada iniciada por backend; muestra llamada entrante y tono distintivo |
+| `config` | Modo de configuracion local |
 
-El dispositivo dispone de **un único botón físico**, capaz de generar
-tres tipos de eventos.
+`standby` es el estado base y de retorno.
 
-## 2.1 Press (P)
+## 4. Transiciones principales
 
-Pulsación corta.
+### 4.1 Desde `standby`
 
-Se produce cuando:
+| Evento | Resultado |
+| --- | --- |
+| `press_hold` | Entrar inmediatamente en `listening` |
+| `single_click` | Enviar senal de llamada al backend y entrar en `calling` |
+| `double_click` | Entrar en `config` |
+| `backend_incoming_call` | Entrar en `incoming_call` |
 
--   el botón se presiona
--   se libera rápidamente
+### 4.2 Desde `listening`
 
-Uso típico:
+| Evento | Resultado |
+| --- | --- |
+| mantener presionado | Permanecer en `listening` |
+| `release` | Detener captura, empaquetar/enviar audio y volver a `standby` |
 
--   acción principal
--   navegación en menús
+Regla importante: al liberar el boton no suena beep local de fin.
 
-## 2.2 Double Press (D)
+### 4.3 Desde `calling`
 
-Doble pulsación.
+| Evento | Resultado |
+| --- | --- |
+| saludo de backend en reproduccion | Mantener flujo de llamada saliente |
+| fin de reproduccion del saludo | Volver automaticamente a `standby` |
 
-Se produce cuando:
+`calling` es transitorio. No deja un modo persistente despues del saludo.
 
--   se realizan dos pulsaciones cortas consecutivas
--   dentro de una ventana de tiempo definida.
+### 4.4 Desde `config`
 
-Uso típico:
+| Evento | Resultado |
+| --- | --- |
+| `backend_incoming_call` | `incoming_call` preempta `config` automaticamente |
 
--   cancelar
--   salir de un modo
+Los detalles internos de `config` no se modelan aun en este documento.
 
-## 2.3 Long Press (L)
+### 4.5 Desde `incoming_call`
 
-Pulsación larga.
+| Evento | Resultado |
+| --- | --- |
+| llamada entrante activa | Mantener aviso visual/sonoro de llamada |
+| `press_hold` | Pasar a `listening` para hablar normalmente |
+| `release` tras hablar | Detener captura, enviar audio y volver a `standby` |
 
-Se produce cuando:
+## 5. Flujos nominales
 
--   el botón permanece presionado durante un tiempo prolongado
--   superior al umbral definido.
+### Hold-to-talk
 
-Uso típico:
+`standby` -> `listening` mientras el boton esta presionado -> `release` -> envio de audio -> `standby`
 
--   confirmaciones
--   cambio de modo
--   acciones estructurales (bloqueo, selección de agente, etc).
+### Llamada saliente
 
-------------------------------------------------------------------------
+`standby` -> `single_click` -> `calling` (`llamando`) -> saludo backend -> fin playback -> beep de fin opcional -> `standby`
 
-# 3. Estados del sistema
+### Configuracion
 
-El dispositivo puede encontrarse en los siguientes estados:
+`standby` -> `double_click` -> `config`
 
-  Estado   Descripción
-  -------- -------------------------------------
-  LOCKED   Dispositivo bloqueado
-  READY    Estado principal del dispositivo
-  LISTEN   Estado de escucha del usuario
-  MENU     Menú principal de configuración
-  MODE     Selección de modo de funcionamiento
-  AGENTS   Selección de agente conversacional
+### Llamada entrante
 
-El estado **READY** actúa como **estado central del sistema**.
+`standby|config` -> `backend_incoming_call` -> `incoming_call` -> `press_hold` -> `listening` -> `release` -> envio de audio -> `standby`
 
-------------------------------------------------------------------------
+## 6. Reglas de audio y feedback
 
-# 4. Descripción detallada de estados
+- El beep de fin solo puede sonar cuando termina el playback de audio recibido desde backend.
+- Nunca debe sonar beep por soltar el boton.
+- `incoming_call` debe tener un sonido distinguible del audio normal de respuesta.
 
-## 4.1 Estado: LOCKED
+## 7. Fuera de alcance actual
 
-### Descripción
+- modelado interno de `config`
+- cancelacion de llamada entrante antes de respuesta por parte del backend
+- flujos legacy de bloqueo, menu, seleccion de modo o seleccion de agente como modelo canonico visible
 
-Estado de seguridad del dispositivo.
+## 8. Canonicalidad
 
-En este estado:
-
--   el dispositivo permanece bloqueado
--   no se aceptan acciones funcionales
--   no se puede iniciar conversación.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ -------------------------
-  Press (P)          No ocurre nada
-  Double Press (D)   No ocurre nada
-  Long Press (L)     Desbloquear dispositivo
-
-### Transición
-
-LOCKED --(Long Press)--\> READY
-
-------------------------------------------------------------------------
-
-## 4.2 Estado: READY
-
-### Descripción
-
-Estado principal del sistema.
-
-En este estado el dispositivo:
-
--   está listo para iniciar conversación
--   espera interacción del usuario.
-
-Es el **estado de retorno de la mayoría de las operaciones**.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ ----------------------
-  Press (P)          Iniciar escucha
-  Double Press (D)   Abrir menú
-  Long Press (L)     Bloquear dispositivo
-
-### Transiciones
-
-READY --(Press)--\> LISTEN\
-READY --(Double Press)--\> MENU\
-READY --(Long Press)--\> LOCKED
-
-------------------------------------------------------------------------
-
-## 4.3 Estado: LISTEN
-
-### Descripción
-
-Estado en el que el dispositivo **está escuchando al usuario**.
-
-En este estado:
-
--   el micrófono está activo
--   se captura audio del usuario
--   se espera una finalización manual o cancelación.
-
-Entrar en este estado implica comenzar una interacción conversacional.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ -------------------
-  Press (P)          Finalizar escucha
-  Double Press (D)   Cancelar escucha
-  Long Press (L)     Cambiar agente
-
-### Transiciones
-
-LISTEN --(Press)--\> READY
-
-Finaliza la captura de audio.
-
-LISTEN --(Double Press)--\> READY
-
-La captura se cancela y el audio se descarta.
-
-LISTEN --(Long Press)--\> AGENTS
-
-Comportamiento:
-
-1.  se detiene la escucha
-2.  se abandona el estado LISTEN
-3.  se entra en el selector de agentes
-
-Importante:
-
-El cambio de agente **no ocurre dentro del estado LISTEN**.\
-La pulsación larga provoca **una transición al estado AGENTS**.
-
-------------------------------------------------------------------------
-
-## 4.4 Estado: MENU
-
-### Descripción
-
-Menú principal del dispositivo.
-
-Desde este estado el usuario puede navegar entre diferentes opciones de
-configuración.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ ------------------
-  Press (P)          Siguiente opción
-  Double Press (D)   Cancelar menú
-  Long Press (L)     Entrar en opción
-
-### Transiciones
-
-MENU --(Press)--\> MENU (siguiente opción)\
-MENU --(Double Press)--\> READY\
-MENU --(Long Press)--\> MODE
-
-------------------------------------------------------------------------
-
-## 4.5 Estado: MODE
-
-### Descripción
-
-Submenú de selección de modo del dispositivo.
-
-Permite cambiar el modo operativo del sistema.
-
-Ejemplos de modos posibles:
-
--   conversación
--   asistente
--   otros modos del sistema.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ ---------------------
-  Press (P)          Siguiente modo
-  Double Press (D)   Cancelar
-  Long Press (L)     Confirmar selección
-
-### Transiciones
-
-MODE --(Press)--\> MODE (siguiente modo)\
-MODE --(Double Press)--\> READY\
-MODE --(Long Press)--\> READY (modo confirmado)
-
-------------------------------------------------------------------------
-
-## 4.6 Estado: AGENTS
-
-### Descripción
-
-Selector de agentes conversacionales.
-
-Permite elegir el agente activo con el que el dispositivo interactuará.
-
-### Acciones permitidas
-
-  Evento             Resultado
-  ------------------ --------------------
-  Press (P)          Siguiente agente
-  Double Press (D)   Cancelar selección
-  Long Press (L)     Confirmar agente
-
-### Transiciones
-
-AGENTS --(Press)--\> AGENTS (siguiente agente)\
-AGENTS --(Double Press)--\> READY\
-AGENTS --(Long Press)--\> READY (agente confirmado)
-
-### Activación del agente
-
-Cuando se confirma:
-
-1.  el agente seleccionado pasa a ser el agente activo
-2.  el sistema retorna al estado READY.
-
-------------------------------------------------------------------------
-
-# 5. Flujo principal del sistema
-
-El flujo típico de uso es:
-
-LOCKED → Long Press → READY → Press → LISTEN → Press → READY
-
-Desde READY también se puede:
-
-READY → MENU\
-READY → LOCKED\
-READY → LISTEN
-
-------------------------------------------------------------------------
-
-# 6. Principios de diseño de interacción
-
-El sistema sigue una semántica consistente:
-
-  Acción         Significado general
-  -------------- ------------------------------
-  Press          Acción principal / avanzar
-  Double Press   Cancelar / salir
-  Long Press     Confirmar / cambiar contexto
-
-Esto permite que el usuario:
-
--   aprenda el sistema rápidamente
--   tenga comportamientos consistentes entre estados.
+Si otra documentacion del repositorio contradice este documento en materia de interaccion del boton o estados visibles, este documento y el ADR-0003 prevalecen.

@@ -121,10 +121,9 @@ async def test_send_error_emits_error_then_error_ui_state() -> None:
     websocket = FakeWebSocket()
     session = make_session(websocket)
     await backend.send_error(session, "bad", code="x")
+    assert len(websocket.sent) == 1
     assert websocket.sent[0]["type"] == "error"
     assert websocket.sent[0]["code"] == "x"
-    assert websocket.sent[1]["type"] == "ui.state"
-    assert websocket.sent[1]["state"] == "error"
 
 
 @pytest.mark.asyncio
@@ -290,7 +289,7 @@ async def test_cancel_recording_resets_session_and_cleans_audio() -> None:
     assert session.audio_file_path is None
     assert not os.path.exists(pcm_path)
     assert websocket.sent[-1]["type"] == "ui.state"
-    assert websocket.sent[-1]["state"] == "idle"
+    assert websocket.sent[-1]["state"] == "standby"
 
 
 @pytest.mark.asyncio
@@ -306,7 +305,7 @@ async def test_interrupt_assistant_cancels_running_task_and_sets_idle() -> None:
     assert session.interrupted.is_set()
     assert session.response_task.cancelled()
     assert websocket.sent[-1]["type"] == "ui.state"
-    assert websocket.sent[-1]["state"] == "idle"
+    assert websocket.sent[-1]["state"] == "standby"
 
 
 @pytest.mark.asyncio
@@ -633,6 +632,48 @@ async def test_send_session_ready_emits_protocol_and_capabilities(monkeypatch: p
 
 
 @pytest.mark.asyncio
+async def test_start_outbound_call_emits_greeting_and_returns_to_standby(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+    session.authenticated = True
+    monkeypatch.setattr(backend, "OUTBOUND_CALL_GREETING", "Hola desde backend")
+    monkeypatch.setattr(backend.call_flow_service, "synthesize_text_to_audio", AsyncMock(return_value=True))
+
+    await backend.start_outbound_call(session, {"type": "call.start", "turn_id": "call-1"})
+
+    assert session.response_task is not None
+    await session.response_task
+
+    types = [message["type"] for message in websocket.sent]
+    assert types[0] == "ui.state"
+    assert websocket.sent[0]["state"] == "calling"
+    assert "assistant.start" in types
+    assert "assistant.text.partial" in types
+    assert "assistant.text.final" in types
+    assert websocket.sent[-1]["type"] == "ui.state"
+    assert websocket.sent[-1]["state"] == "standby"
+    final = next(message for message in websocket.sent if message["type"] == "assistant.text.final")
+    assert final["text"] == "Hola desde backend"
+    assert final["interaction"] == "outbound_call"
+
+
+@pytest.mark.asyncio
+async def test_send_incoming_call_emits_contract_message_and_state() -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+
+    await backend.send_incoming_call(session, call_id="incoming-1", from_backend="scheduler")
+
+    assert websocket.sent[0]["type"] == "ui.state"
+    assert websocket.sent[0]["state"] == "incoming_call"
+    assert websocket.sent[1]["type"] == "incoming_call"
+    assert websocket.sent[1]["call_id"] == "incoming-1"
+    assert websocket.sent[1]["from_backend"] == "scheduler"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_device_hello_authenticates_and_sends_ready() -> None:
     websocket = FakeWebSocket()
     session = make_session(websocket)
@@ -661,12 +702,27 @@ async def test_handle_message_rejects_when_not_authenticated() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_message_call_start_routes_to_outbound_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    websocket = FakeWebSocket()
+    session = make_session(websocket)
+    session.authenticated = True
+    start_call_mock = AsyncMock()
+    monkeypatch.setattr(backend.message_router_service, "start_outbound_call", start_call_mock)
+
+    await backend.handle_message(session, {"type": "call.start"})
+
+    start_call_mock.assert_awaited_once_with(backend._container.context, session, {"type": "call.start"})
+
+
+@pytest.mark.asyncio
 async def test_handle_message_agent_select_valid_and_invalid() -> None:
     websocket = FakeWebSocket()
     session = make_session(websocket)
     session.authenticated = True
     await backend.handle_message(session, {"type": "agent.select", "agent_id": "invalid"})
-    assert websocket.sent[-2]["type"] == "error"
+    assert websocket.sent[-1]["type"] == "error"
 
     websocket.sent.clear()
     await backend.handle_message(session, {"type": "agent.select", "agent_id": backend.AVAILABLE_AGENTS[0]})
@@ -702,11 +758,12 @@ async def test_handle_message_agents_list_request_returns_catalog_and_active_age
 def test_validate_device_message_accepts_new_agent_catalog_requests() -> None:
     assert backend.validate_device_message({"type": "agents.version.request"})["type"] == "agents.version.request"
     assert backend.validate_device_message({"type": "agents.list.request"})["type"] == "agents.list.request"
+    assert backend.validate_device_message({"type": "call.start"})["type"] == "call.start"
 
 
 def test_backend_ui_state_contract_stays_remote_only() -> None:
     remote_states = {state.value for state in UiState}
-    assert remote_states == {"idle", "listening", "processing", "speaking", "error"}
+    assert remote_states == {"standby", "listening", "calling", "incoming_call", "config"}
 
 
 @pytest.mark.asyncio
@@ -792,7 +849,7 @@ async def test_handle_message_interrupt_ping_and_unknown() -> None:
     assert websocket.sent[-1]["type"] == "pong"
 
     await backend.handle_message(session, {"type": "unknown"})
-    assert websocket.sent[-2]["type"] == "error"
+    assert websocket.sent[-1]["type"] == "error"
 
 
 @pytest.mark.asyncio

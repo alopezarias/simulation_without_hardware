@@ -28,5 +28,7 @@ class KeyboardButton:
         target = root or self._root
         if target is None:
             raise ValueError("KeyboardButton requires a root widget to bind keys")
-        target.bind("<space>", lambda _event: self.dispatch("press"))
-        target.bind("<Escape>", lambda _event: self.dispatch("long_press"))
+        target.bind("<KeyPress-space>", lambda _event: self.dispatch("long_press"))
+        target.bind("<KeyRelease-space>", lambda _event: self.dispatch("release"))
+        target.bind("<Return>", lambda _event: self.dispatch("press"))
+        target.bind("<Escape>", lambda _event: self.dispatch("double_press"))

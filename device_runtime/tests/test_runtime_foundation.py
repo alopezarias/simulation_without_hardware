@@ -184,40 +184,38 @@ def test_runtime_config_rejects_non_websocket_urls() -> None:
         load_runtime_config({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "http://localhost/ws"})
 
 
-def test_display_model_service_builds_shared_focus_labels() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.AGENTS)
-    snapshot.agents = ["assistant-general", "assistant-tech"]
-    snapshot.navigation.focused_agent_index = 1
+def test_display_model_service_builds_incoming_call_view() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.INCOMING_CALL)
     snapshot.warnings = ["audio_in unavailable"]
     snapshot.connected = True
     snapshot.diagnostics.transport_status = "connected"
 
     model = DisplayModelService().build(snapshot, PowerStatus(78.0, True, "pisugar", True, "ok"))
 
-    assert model.local_state == "AGENTS"
-    assert model.focus_label == "assistant-tech"
+    assert model.local_state == "incoming_call"
+    assert model.focus_label == "incoming_call"
     assert model.warnings == ["audio_in unavailable"]
-    assert model.scene == "agent-selection"
+    assert model.scene == "incoming-call"
     assert model.battery_label == "BAT 78% CHG"
     assert model.network_label == "NET CONNECTED"
-    assert model.center_title == "assistant-tech"
-    assert model.center_body == "Agent 2/2"
+    assert model.center_title == "Incoming call"
+    assert model.center_body == "Hold to answer"
 
 
 def test_experience_service_builds_screen_and_rgb_from_single_snapshot() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.CALLING)
     snapshot.connected = True
-    snapshot.remote_ui_state = UiState.PROCESSING
+    snapshot.remote_ui_state = UiState.CALLING
 
     experience = ExperienceService().build(snapshot, PowerStatus(51.0, False, "pisugar", True, "ok"))
 
-    assert experience.screen.scene == "processing"
-    assert experience.rgb_signal.state == "processing"
+    assert experience.screen.scene == "calling"
+    assert experience.rgb_signal.state == "calling"
     assert experience.power.battery_percent == 51.0
 
 
 def test_rgb_policy_prefers_disconnected_over_ready_state() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     signal = RgbPolicyService().select(snapshot, PowerStatus(None, None, "pisugar", False, "offline"))
 
     assert signal.state == "disconnected"
@@ -226,11 +224,11 @@ def test_rgb_policy_prefers_disconnected_over_ready_state() -> None:
 
 
 def test_rgb_policy_uses_vivid_ready_and_listening_colors() -> None:
-    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.READY)
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     snapshot.connected = True
 
     ready = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
-    snapshot.device_state = DeviceState.LISTEN
+    snapshot.device_state = DeviceState.LISTENING
     snapshot.listening_active = True
     listening = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
 
@@ -353,6 +351,9 @@ class FakePlayback:
     def stop(self, clear_buffer: bool = True) -> None:
         self.started = False
         self.stop_calls.append(clear_buffer)
+
+    def end_session(self) -> None:
+        self.stop_calls.append(False)
 
 
 class AudioTransport(FakeTransport):

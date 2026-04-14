@@ -13,11 +13,11 @@ def normalize_message_type(raw: Any) -> str:
     return str(raw).strip()
 
 
-def coerce_ui_state(raw: Any, *, default: UiState = UiState.IDLE) -> tuple[UiState, str | None]:
+def coerce_ui_state(raw: Any, *, default: UiState = UiState.STANDBY) -> tuple[UiState, str | None]:
     state_value = normalize_message_type(raw)
     if not state_value:
         return default, None
     try:
         return UiState(state_value), None
     except ValueError:
-        return UiState.ERROR, f"ui.state invalid: {state_value}"
+        return UiState.STANDBY, f"ui.state invalid: {state_value}"

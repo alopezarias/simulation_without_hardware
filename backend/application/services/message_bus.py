@@ -25,4 +25,3 @@ async def send_ui_state(session: DeviceSession, state: UiState) -> None:
 
 async def send_error(session: DeviceSession, detail: str, code: str = "protocol_error") -> None:
     await send(session, build_message("error", code=code, detail=detail))
-    await send_ui_state(session, UiState.ERROR)

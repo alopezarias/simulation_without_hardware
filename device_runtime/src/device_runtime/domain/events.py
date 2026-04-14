@@ -10,12 +10,11 @@ from typing import Any
 class DeviceState(str, Enum):
     """Observable local device states owned by the runtime."""
 
-    LOCKED = "LOCKED"
-    READY = "READY"
-    LISTEN = "LISTEN"
-    MENU = "MENU"
-    MODE = "MODE"
-    AGENTS = "AGENTS"
+    STANDBY = "standby"
+    LISTENING = "listening"
+    CALLING = "calling"
+    INCOMING_CALL = "incoming_call"
+    CONFIG = "config"
 
 
 class DeviceInputEvent(str, Enum):
@@ -24,6 +23,7 @@ class DeviceInputEvent(str, Enum):
     PRESS = "press"
     DOUBLE_PRESS = "double_press"
     LONG_PRESS = "long_press"
+    RELEASE = "release"
 
 
 class DomainEffect(str, Enum):
@@ -31,16 +31,7 @@ class DomainEffect(str, Enum):
 
     START_LISTEN = "start_listen"
     STOP_LISTEN_FINALIZE = "stop_listen_finalize"
-    STOP_LISTEN_CANCEL = "stop_listen_cancel"
-    REQUEST_AGENTS_VERSION = "request_agents_version"
-    REQUEST_AGENTS_LIST = "request_agents_list"
-    CONFIRM_AGENT = "confirm_agent"
-
-
-class MenuOption(str, Enum):
-    """Top-level menu entries navigated locally by the runtime."""
-
-    MODE = "MODE"
+    START_CALL = "start_call"
 
 
 @dataclass(slots=True)

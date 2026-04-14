@@ -11,16 +11,17 @@ from typing import Any
 class UiState(str, Enum):
     """Main UI states shared by backend and simulator."""
 
-    IDLE = "idle"
+    STANDBY = "standby"
     LISTENING = "listening"
-    PROCESSING = "processing"
-    SPEAKING = "speaking"
-    ERROR = "error"
+    CALLING = "calling"
+    INCOMING_CALL = "incoming_call"
+    CONFIG = "config"
 
 
 DEVICE_MESSAGE_TYPES = {
     "device.hello",
     "session.start",
+    "call.start",
     "agent.select",
     "agents.version.request",
     "agents.list.request",
@@ -31,6 +32,26 @@ DEVICE_MESSAGE_TYPES = {
     "assistant.interrupt",
     "ping",
     "debug.user_text",
+}
+
+
+BACKEND_MESSAGE_TYPES = {
+    "session.ready",
+    "ui.state",
+    "error",
+    "pong",
+    "agent.selected",
+    "agents.version.response",
+    "agents.list.response",
+    "transcript.partial",
+    "transcript.final",
+    "assistant.start",
+    "assistant.text.partial",
+    "assistant.text.final",
+    "assistant.audio.start",
+    "assistant.audio.chunk",
+    "assistant.audio.end",
+    "incoming_call",
 }
 
 

@@ -22,6 +22,11 @@ def test_runtime_message_types_match_backend_contract() -> None:
     assert DEVICE_MESSAGE_TYPES == backend_protocol.DEVICE_MESSAGE_TYPES
 
 
+def test_runtime_backend_message_types_cover_simplified_incoming_call_contract() -> None:
+    assert "incoming_call" in backend_protocol.BACKEND_MESSAGE_TYPES
+    assert MessageType.CALL_START.value in backend_protocol.DEVICE_MESSAGE_TYPES
+
+
 def test_runtime_build_message_shape_matches_backend() -> None:
     runtime_message = build_message(MessageType.DEVICE_HELLO, device_id="raspi-1")
     backend_message = backend_protocol.build_message("device.hello", device_id="raspi-1")
