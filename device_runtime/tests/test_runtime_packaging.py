@@ -42,6 +42,14 @@ def test_runtime_package_installs_and_bootstraps_without_backend_repo(tmp_path: 
     install_env = os.environ.copy()
     install_env.pop("PYTHONPATH", None)
     subprocess.run(
+        [str(python_bin), "-m", "pip", "install", "setuptools", "wheel"],
+        cwd=standalone_root,
+        env=install_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
         [str(python_bin), "-m", "pip", "install", "--no-build-isolation", "--no-deps", "."],
         cwd=standalone_root,
         env=install_env,
@@ -118,6 +126,14 @@ def test_runtime_package_installs_smoke_console_script(tmp_path: Path) -> None:
 
     install_env = os.environ.copy()
     install_env.pop("PYTHONPATH", None)
+    subprocess.run(
+        [str(python_bin), "-m", "pip", "install", "setuptools", "wheel"],
+        cwd=standalone_root,
+        env=install_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     subprocess.run(
         [str(python_bin), "-m", "pip", "install", "--no-build-isolation", "--no-deps", "."],
         cwd=standalone_root,
@@ -268,3 +284,94 @@ def test_raspberry_shell_scripts_have_valid_bash_syntax() -> None:
             capture_output=True,
             text=True,
         )
+
+
+def test_install_raspberry_bootstraps_pisugar_support_from_installer(tmp_path: Path) -> None:
+    source_root = tmp_path / "device_runtime_source"
+    install_root = tmp_path / "device_runtime_install"
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+
+    for relative_path in [
+        ".env.example",
+        "README.md",
+        "deploy/device-runtime.service",
+        "pyproject.toml",
+        "requirements-base.txt",
+        "requirements-raspi.txt",
+        "scripts/install_raspberry.sh",
+        "scripts/run_runtime.sh",
+        "scripts/smoke_check.sh",
+    ]:
+        (source_root / relative_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(RUNTIME_ROOT / relative_path, source_root / relative_path)
+    shutil.copytree(RUNTIME_ROOT / "src", source_root / "src")
+
+    stub_scripts = {
+        "id": "#!/bin/sh\ncase \"${1:-}\" in\n  -u) printf '0\\n' ;;\n  -un) printf 'pi\\n' ;;\n  -gn) printf 'pi\\n' ;;\n  *) /usr/bin/id \"$@\" ;;\nesac\n",
+        "systemctl": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_SYSTEMCTL_LOG\"\nif [ \"${1:-}\" = 'list-unit-files' ]; then\n  exit 1\nfi\nexit 0\n",
+        "chown": "#!/bin/sh\nexit 0\n",
+        "apt-get": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_APT_LOG\"\nexit 0\n",
+        "debconf-set-selections": "#!/bin/sh\ncat >> \"$TEST_DEBCONF_LOG\"\n",
+        "raspi-config": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_RASPI_CONFIG_LOG\"\nexit 0\n",
+        "modprobe": "#!/bin/sh\nexit 0\n",
+        "wget": "#!/bin/sh\ndest=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-O' ]; then\n    dest=\"$2\"\n    shift 2\n    continue\n  fi\n  shift\ndone\ncp \"$TEST_PISUGAR_INSTALLER\" \"$dest\"\nchmod +x \"$dest\"\n",
+    }
+    for name, body in stub_scripts.items():
+        path = fakebin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    fake_installer = tmp_path / "pisugar-installer.sh"
+    fake_installer.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" > \"$TEST_PISUGAR_INSTALLER_ARGS\"\n"
+        "mkdir -p \"$(dirname \"$DEVICE_RUNTIME_PISUGAR_DEFAULTS_PATH\")\"\n"
+        "printf 'DAEMON_ARGS=\\\"--tcp 0.0.0.0:8423\\\"\\n' > \"$DEVICE_RUNTIME_PISUGAR_DEFAULTS_PATH\"\n"
+        "touch \"$TEST_PISUGAR_INSTALL_MARKER\"\n",
+        encoding="utf-8",
+    )
+    fake_installer.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fakebin}:{env['PATH']}",
+            "SUDO_USER": "pi",
+            "DEVICE_RUNTIME_INSTALL_ROOT": str(install_root),
+            "DEVICE_RUNTIME_SERVICE_PATH": str(tmp_path / "device-runtime.service"),
+            "DEVICE_RUNTIME_INSTALL_RASPI_EXTRAS": "0",
+            "DEVICE_RUNTIME_ENABLE_SERVICE": "1",
+            "DEVICE_RUNTIME_RESTART_SERVICE": "1",
+            "DEVICE_RUNTIME_INSTALL_PISUGAR": "1",
+            "DEVICE_RUNTIME_PISUGAR_MODEL": "PiSugar 3",
+            "DEVICE_RUNTIME_PISUGAR_DEFAULTS_PATH": str(tmp_path / "etc/default/pisugar-server"),
+            "TEST_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
+            "TEST_APT_LOG": str(tmp_path / "apt.log"),
+            "TEST_DEBCONF_LOG": str(tmp_path / "debconf.log"),
+            "TEST_RASPI_CONFIG_LOG": str(tmp_path / "raspi-config.log"),
+            "TEST_PISUGAR_INSTALLER": str(fake_installer),
+            "TEST_PISUGAR_INSTALLER_ARGS": str(tmp_path / "pisugar-installer-args.log"),
+            "TEST_PISUGAR_INSTALL_MARKER": str(tmp_path / "pisugar-installed"),
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        }
+    )
+
+    subprocess.run(
+        ["bash", str(source_root / "scripts/install_raspberry.sh")],
+        cwd=source_root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (tmp_path / "pisugar-installed").exists()
+    assert "-c release" in (tmp_path / "pisugar-installer-args.log").read_text(encoding="utf-8")
+    assert "--model 'PiSugar 3'" in (tmp_path / "etc/default/pisugar-server").read_text(encoding="utf-8")
+    service_text = (tmp_path / "device-runtime.service").read_text(encoding="utf-8")
+    assert "After=network-online.target pisugar-server.service" in service_text
+    systemctl_log = (tmp_path / "systemctl.log").read_text(encoding="utf-8")
+    assert "enable pisugar-server.service" in systemctl_log
+    assert "restart pisugar-server.service" in systemctl_log
+    assert "enable device-runtime.service" in systemctl_log

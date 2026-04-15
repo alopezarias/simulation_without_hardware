@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import struct
 from typing import Any, Callable
 
 try:
@@ -70,7 +71,11 @@ class AlsaPlayback:
         self._drain_pending(force=False)
 
     def end_session(self) -> None:
-        self._drain_pending(force=True)
+        self._drain_pending(force=True, finalize=True)
+        pcm = self._pcm
+        drain = getattr(pcm, "drain", None)
+        if callable(drain):
+            drain()
 
     def stop(self, clear_buffer: bool = True) -> None:
         self.started = False
@@ -101,7 +106,7 @@ class AlsaPlayback:
             if method is not None:
                 method(value)
 
-    def _drain_pending(self, *, force: bool) -> None:
+    def _drain_pending(self, *, force: bool, finalize: bool = False) -> None:
         pcm = self._pcm
         write = getattr(pcm, "write", None)
         if pcm is None or not callable(write):
@@ -116,7 +121,49 @@ class AlsaPlayback:
             take = len(self._pending) if force else chunk_bytes
             payload = bytes(self._pending[:take])
             del self._pending[:take]
+            if finalize and not self._pending:
+                payload = self._finalize_payload(payload)
             write(payload)
+
+    def _finalize_payload(self, payload: bytes) -> bytes:
+        if not payload:
+            return payload
+        frame_bytes = max(2, self.channels * 2)
+        if len(payload) % frame_bytes:
+            return payload
+        usable = len(payload) - (len(payload) % frame_bytes)
+        trimmed = payload[:usable]
+        if not trimmed:
+            return b""
+        faded = self._apply_fade_out(trimmed, frame_bytes=frame_bytes)
+        silence_tail = self._silence_tail_bytes(frame_bytes=frame_bytes)
+        combined = faded + (b"\x00" * silence_tail)
+        remainder = len(combined) % self._period_bytes
+        if remainder:
+            combined += b"\x00" * (self._period_bytes - remainder)
+        return combined
+
+    def _apply_fade_out(self, payload: bytes, *, frame_bytes: int) -> bytes:
+        total_frames = len(payload) // frame_bytes
+        if total_frames <= 1:
+            return payload
+        fade_frames = min(total_frames, max(8, int(self.sample_rate * 0.012)))
+        if fade_frames <= 1:
+            return payload
+        rendered = bytearray(payload)
+        first_frame = total_frames - fade_frames
+        for frame_index in range(first_frame, total_frames):
+            multiplier = (total_frames - frame_index - 1) / max(1, fade_frames - 1)
+            base = frame_index * frame_bytes
+            for channel_index in range(max(1, self.channels)):
+                sample_offset = base + (channel_index * 2)
+                sample = struct.unpack_from("<h", rendered, sample_offset)[0]
+                struct.pack_into("<h", rendered, sample_offset, int(sample * multiplier))
+        return bytes(rendered)
+
+    def _silence_tail_bytes(self, *, frame_bytes: int) -> int:
+        tail_frames = max(1, min(self._period_bytes // frame_bytes, int(self.sample_rate * 0.008)))
+        return tail_frames * frame_bytes
 
     @property
     def _period_bytes(self) -> int:

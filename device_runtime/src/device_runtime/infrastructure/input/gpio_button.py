@@ -23,7 +23,7 @@ class GpioButton:
         *,
         button_factory: Callable[..., Any] | None = None,
         bounce_time: float = 0.05,
-        long_press_ms: int = 900,
+        long_press_ms: int = 400,
         double_press_ms: int = 350,
         timer_factory: Callable[[float, Callable[[], None]], Any] | None = None,
         clock: Callable[[], float] | None = None,

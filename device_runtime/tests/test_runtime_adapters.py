@@ -59,6 +59,14 @@ class FakeGateway:
         self.sent.append({"type": "audio.chunk", "turn_id": turn_id, **chunk})
 
 
+class FakeObserver:
+    def __init__(self) -> None:
+        self.states: list[DeviceSnapshot] = []
+
+    def publish(self, snapshot: DeviceSnapshot) -> None:
+        self.states.append(snapshot)
+
+
 class FakeRoot:
     def __init__(self) -> None:
         self.bound: dict[str, Any] = {}
@@ -157,6 +165,12 @@ class FakeSocket:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeMeasureDraw:
+    def textlength(self, text: str, font: Any = None) -> int:
+        widths = {"W": 12, "i": 4, ".": 3, " ": 4}
+        return sum(widths.get(char, 8) for char in text)
 
 
 class FakeButtonDevice:
@@ -348,6 +362,7 @@ def test_whisplay_display_can_render_line_oriented_driver() -> None:
             {
                 "local_state": "READY",
                 "scene": "ready",
+                "status_icon": "MIC",
                 "status_text": "Ready",
                 "status_detail": "Press to talk",
                 "center_title": "Press to talk",
@@ -359,7 +374,9 @@ def test_whisplay_display_can_render_line_oriented_driver() -> None:
                 "mic_live": False,
                 "connected": True,
                 "network_label": "NET CONNECTED",
-                "battery_label": "BAT 82%",
+                "battery_label": "82%",
+                "battery_percent": 82,
+                "battery_charging": False,
                 "diagnostics_label": "Runtime healthy",
                 "header_badges": ["NET CONNECTED", "BAT 82%"],
                 "transcript_preview": "hola mundo",
@@ -372,7 +389,7 @@ def test_whisplay_display_can_render_line_oriented_driver() -> None:
 
     assert driver.cleared >= 1
     assert driver.presented >= 1
-    assert any("Ready" in text and "BAT 82%" in text for _, text in driver.lines)
+    assert any("Ready" in text and "82%" in text for _, text in driver.lines)
     assert any("adapter ok" in text for _, text in driver.lines)
 
 
@@ -384,6 +401,7 @@ def test_whisplay_display_compacts_long_content_for_small_screen() -> None:
         {
             "local_state": "READY",
             "scene": "speaking",
+            "status_icon": "OUT",
             "status_text": "Speaking",
             "status_detail": "Assistant audio live",
             "center_title": "Respuesta en curso",
@@ -395,7 +413,9 @@ def test_whisplay_display_compacts_long_content_for_small_screen() -> None:
             "mic_live": False,
             "connected": True,
             "network_label": "NET CONNECTED",
-            "battery_label": "BAT 82%",
+            "battery_label": "82%",
+            "battery_percent": 82,
+            "battery_charging": False,
             "diagnostics_label": "Runtime healthy",
             "header_badges": ["NET CONNECTED", "BAT 82%"],
             "transcript_label": "YOU",
@@ -412,7 +432,7 @@ def test_whisplay_display_compacts_long_content_for_small_screen() -> None:
     assert display.last_frame is not None
     assert len(display.last_frame["lines"]) <= 6
     assert display.last_frame["lines"][0].startswith("Speaking")
-    assert display.last_frame["top_row"].endswith("BAT 82%")
+    assert display.last_frame["top_row"].endswith("82%")
     assert display.last_frame["center_title"] == "Respuesta en curso"
 
 
@@ -445,6 +465,7 @@ def test_whisplay_display_loads_vendor_whisplay_board_from_driver_path(tmp_path:
             {
                 "local_state": "READY",
                 "scene": "ready",
+                "status_icon": "Zz",
                 "status_text": "Ready",
                 "status_detail": "Press to talk",
                 "center_title": "Press to talk",
@@ -456,7 +477,9 @@ def test_whisplay_display_loads_vendor_whisplay_board_from_driver_path(tmp_path:
                 "mic_live": False,
                 "connected": True,
                 "network_label": "NET CONNECTED",
-                "battery_label": "BAT 82%",
+                "battery_label": "82%",
+                "battery_percent": 82,
+                "battery_charging": False,
                 "diagnostics_label": "Runtime healthy",
                 "header_badges": ["NET CONNECTED", "BAT 82%"],
                 "transcript_preview": "hola mundo",
@@ -479,13 +502,54 @@ def test_display_model_service_surfaces_disconnected_battery_unavailable_copy() 
     snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     snapshot.connected = False
     snapshot.diagnostics.transport_status = "disconnected"
+    snapshot.warnings = ["power unavailable: Battery unavailable"]
 
     model = DisplayModelService().build(snapshot, PowerStatus(None, None, "pisugar", False, "PiSugar unavailable"))
 
     assert model.scene == "disconnected"
     assert model.status_text == "Offline"
-    assert model.battery_label == "BAT --"
-    assert model.diagnostics_label == "PiSugar unavailable"
+    assert model.battery_label == "--"
+    assert model.diagnostics_label == ""
+    assert model.warnings == []
+
+
+def test_whisplay_display_skips_render_when_frame_does_not_change() -> None:
+    driver = FakeLineDriver()
+    display = WhisplayDisplay(driver=driver)
+    model = type(
+        "Model",
+        (),
+        {
+            "local_state": "READY",
+            "scene": "standby",
+            "status_icon": "Zz",
+            "status_text": "Standby",
+            "status_detail": "Hold to talk",
+            "center_title": "Ready",
+            "center_body": "General",
+            "center_hint": "Hold to talk · Press to call",
+            "remote_state": "idle",
+            "active_agent": "assistant-general",
+            "focus_label": "standby",
+            "mic_live": False,
+            "connected": True,
+            "network_label": "NET CONNECTED",
+            "battery_label": "82%",
+            "battery_percent": 82,
+            "battery_charging": False,
+            "diagnostics_label": "",
+            "header_badges": ["NET CONNECTED", "82%"],
+            "transcript_preview": "",
+            "assistant_preview": "",
+            "warnings": [],
+        },
+    )()
+
+    display.render(model)
+    first_presented = driver.presented
+    display.render(model)
+
+    assert driver.presented == first_presented
 
 
 def test_experience_service_and_rgb_policy_align_on_incoming_call_state() -> None:
@@ -497,6 +561,43 @@ def test_experience_service_and_rgb_policy_align_on_incoming_call_state() -> Non
 
     assert experience.screen.scene == "incoming-call"
     assert experience.rgb_signal == RgbPolicyService().select(snapshot, experience.power)
+
+
+def test_whisplay_display_wraps_body_text_by_pixel_width_not_character_count() -> None:
+    display = WhisplayDisplay(driver=FakeDriver())
+
+    lines = display._wrap_text_pixels(  # noqa: SLF001
+        FakeMeasureDraw(),
+        "iiiiiiii WWW",
+        object(),
+        max_width=50,
+        max_lines=2,
+    )
+
+    assert lines == ["iiiiiiii", "WWW"]
+
+
+def test_pisugar_status_prefers_uds_before_tcp_in_auto_mode() -> None:
+    sockets = iter([
+        FakeSocket(["battery: 84.0\n"]),
+        FakeSocket(["battery_charging: false\n"]),
+    ])
+
+    def unix_socket_factory(_path: str, _timeout: float) -> FakeSocket:
+        return next(sockets)
+
+    def socket_factory(_address: tuple[str, int], _timeout: float) -> socket.socket:
+        raise AssertionError("TCP should not be used when UDS succeeds")
+
+    status = PiSugarStatus(
+        mode="auto",
+        unix_socket_factory=unix_socket_factory,
+        socket_factory=socket_factory,
+    ).read_status()
+
+    assert status.available is True
+    assert status.source == "pisugar-uds"
+    assert status.battery_percent == 84.0
 
 
 def test_pisugar_status_reads_tcp_battery_and_charge_state() -> None:
@@ -523,7 +624,77 @@ def test_pisugar_status_degrades_cleanly_when_tcp_unavailable() -> None:
     status = PiSugarStatus(socket_factory=socket_factory, mode="tcp").read_status()
 
     assert status.available is False
-    assert "connection refused" in status.detail
+    assert status.detail == "Battery unavailable"
+
+
+def test_pisugar_status_falls_back_to_sysfs_after_socket_failures() -> None:
+    def socket_factory(_address: tuple[str, int], _timeout: float) -> socket.socket:
+        raise OSError("connection refused")
+
+    def unix_socket_factory(_path: str, _timeout: float) -> socket.socket:
+        raise FileNotFoundError("missing socket")
+
+    def file_reader(path: str) -> str:
+        if path.endswith("BAT0/capacity"):
+            return "79\n"
+        if path.endswith("BAT0/status"):
+            return "Charging\n"
+        raise FileNotFoundError(path)
+
+    status = PiSugarStatus(
+        socket_factory=socket_factory,
+        unix_socket_factory=unix_socket_factory,
+        file_reader=file_reader,
+        mode="auto",
+        sysfs_root="/fake/power_supply",
+    ).read_status()
+
+    assert status.available is True
+    assert status.source == "pisugar-sysfs"
+    assert status.battery_percent == 79.0
+    assert status.charging is True
+
+
+def test_pisugar_status_reads_sysfs_when_mode_is_explicit() -> None:
+    def socket_factory(_address: tuple[str, int], _timeout: float) -> socket.socket:
+        raise AssertionError("TCP should not be used in sysfs mode")
+
+    def file_reader(path: str) -> str:
+        if path.endswith("pisugar-battery/capacity"):
+            return "64\n"
+        if path.endswith("pisugar-battery/status"):
+            return "Discharging\n"
+        raise FileNotFoundError(path)
+
+    status = PiSugarStatus(
+        socket_factory=socket_factory,
+        file_reader=file_reader,
+        mode="sysfs",
+        sysfs_root="/fake/power_supply",
+    ).read_status()
+
+    assert status.available is True
+    assert status.source == "pisugar-sysfs"
+    assert status.battery_percent == 64.0
+    assert status.charging is False
+
+
+def test_pisugar_status_keeps_battery_when_tcp_charging_probe_fails() -> None:
+    sockets = iter([
+        FakeSocket(["battery: 83.6\n"]),
+    ])
+
+    def socket_factory(_address: tuple[str, int], _timeout: float) -> FakeSocket:
+        try:
+            return next(sockets)
+        except StopIteration as exc:
+            raise OSError("charging unsupported") from exc
+
+    status = PiSugarStatus(socket_factory=socket_factory, mode="tcp").read_status()
+
+    assert status.available is True
+    assert status.battery_percent == 83.6
+    assert status.charging is None
 
 
 def test_hardware_rgb_uses_fade_for_pulse_and_null_rgb_tracks_last_signal() -> None:
@@ -674,6 +845,41 @@ def test_alsa_playback_uses_larger_runtime_chunks_after_one_second_prebuffer() -
     assert written == [b"aabb", b"ccdd", b"eeff", b"gghh", b"iijj"]
 
 
+def test_alsa_playback_fades_and_drains_final_chunk() -> None:
+    written: list[bytes] = []
+    drain_calls = 0
+
+    class PlaybackPcm:
+        def setchannels(self, _value: int) -> None:
+            return None
+
+        def setrate(self, _value: int) -> None:
+            return None
+
+        def setperiodsize(self, _value: int) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+        def drain(self) -> None:
+            nonlocal drain_calls
+            drain_calls += 1
+
+    playback = AlsaPlayback(pcm_factory=PlaybackPcm, period_size=4, chunk_ms=2, start_buffer_ms=0)
+    playback.start(sample_rate=1000, channels=1)
+    playback.push(b"\x10\x00\x20\x00")
+    playback.push(b"\x30\x00\x40\x00")
+    playback.push(b"\x50\x00\x60\x00")
+
+    playback.end_session()
+
+    assert written[0] == b"\x10\x00\x20\x00\x30\x00\x40\x00"
+    assert len(written[1]) == 16
+    assert written[1][-8:] == b"\x00" * 8
+    assert drain_calls == 1
+
+
 def test_raspi_bootstrap_degrades_missing_real_adapters_without_import_failures() -> None:
     runtime = build_runtime(
         {
@@ -709,6 +915,37 @@ async def test_null_audio_capture_keeps_runtime_smoke_safe() -> None:
 
     assert sent == 0
     assert gateway.sent == []
+
+
+async def test_device_controller_marks_audio_outbound_only_while_chunks_are_sent() -> None:
+    class Capture:
+        available = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_chunks(self, max_chunks: int) -> list[dict[str, Any]]:
+            self.calls += 1
+            if self.calls == 1:
+                return [{"payload": "YWJj", "size_bytes": 3}]
+            return []
+
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.LISTENING)
+    snapshot.connected = True
+    snapshot.turn_id = "turn-1"
+    gateway = FakeGateway()
+    observer = FakeObserver()
+    controller = DeviceController(snapshot, gateway=gateway, clock=FakeClock(), observer=observer)
+    capture = Capture()
+
+    sent = await controller.flush_audio_capture(capture, max_chunks=2)
+    assert sent == 1
+    assert controller.snapshot.audio_outbound_active is True
+
+    sent = await controller.flush_audio_capture(capture, max_chunks=2)
+    assert sent == 0
+    assert controller.snapshot.audio_outbound_active is False
+    assert len(observer.states) >= 2
 
 
 async def test_device_controller_hold_to_talk_starts_on_hold_and_stops_on_release() -> None:

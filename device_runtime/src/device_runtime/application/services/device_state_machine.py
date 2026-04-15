@@ -42,6 +42,7 @@ class DeviceStateMachine:
             current.device_state = DeviceState.STANDBY
             current.remote_ui_state = UiState.STANDBY
             current.listening_active = False
+            current.audio_outbound_active = False
             return TransitionResult(
                 snapshot=current,
                 effects=[EffectPayload(DomainEffect.STOP_LISTEN_FINALIZE, {"turn_id": current.turn_id})],
@@ -78,6 +79,7 @@ class DeviceStateMachine:
         snapshot.device_state = DeviceState.LISTENING
         snapshot.remote_ui_state = UiState.LISTENING
         snapshot.listening_active = True
+        snapshot.audio_outbound_active = False
         snapshot.turn_id = self._turn_id_factory()
         snapshot.transcript = ""
         snapshot.assistant_text = ""

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import copy
 from dataclasses import dataclass
+import threading
 import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -62,8 +63,12 @@ class RuntimeObserver(StateObserver):
         self._runtime = runtime
         self._experience_service = ExperienceService()
         self._was_listening = False
+        self._last_snapshot = copy.deepcopy(runtime.snapshot)
+        self._render_lock = threading.RLock()
+        self._power_cache = CachedPowerStatus(runtime.power, on_update=self._publish_power_refresh)
 
     def publish(self, snapshot: DeviceSnapshot) -> None:
+        self._last_snapshot = copy.deepcopy(snapshot)
         listening = snapshot.device_state == DeviceState.LISTENING and snapshot.listening_active
         if listening and not self._was_listening:
             if getattr(self._runtime.audio_capture, "available", False):
@@ -72,13 +77,18 @@ class RuntimeObserver(StateObserver):
             self._runtime.audio_capture.stop()
         self._was_listening = listening
 
-        power_status = self._safe_power_status()
-        experience = self._experience_service.build(snapshot, power_status)
-        self._runtime.display.render(experience.screen)
-        self._apply_rgb(experience.rgb_signal.state, experience.rgb_signal)
-        note = snapshot.diagnostics.last_error or snapshot.diagnostics.last_note
-        if note:
-            self._runtime.display.show_diagnostic(note)
+        power_status = self._power_cache.read_status()
+        self._render_snapshot(snapshot, power_status)
+
+    def _publish_power_refresh(self, power_status: PowerStatus) -> None:
+        self._render_snapshot(self._last_snapshot, power_status)
+
+    def _render_snapshot(self, snapshot: DeviceSnapshot, power_status: PowerStatus) -> None:
+        with self._render_lock:
+            self._last_snapshot = copy.deepcopy(snapshot)
+            experience = self._experience_service.build(snapshot, power_status)
+            self._runtime.display.render(experience.screen)
+            self._apply_rgb(experience.rgb_signal.state, experience.rgb_signal)
 
     def _safe_power_status(self) -> PowerStatus:
         try:
@@ -91,6 +101,44 @@ class RuntimeObserver(StateObserver):
             self._runtime.rgb.apply(signal)
         except Exception as exc:
             self._runtime.display.show_diagnostic(f"rgb degraded: {exc}")
+
+
+class CachedPowerStatus:
+    def __init__(self, reader: Any, *, refresh_interval_s: float = 5.0, on_update: Any | None = None) -> None:
+        self._reader = reader
+        self._refresh_interval_s = refresh_interval_s
+        self._on_update = on_update
+        self._status = PowerStatus(None, None, "pisugar", False, "")
+        self._updated_at = 0.0
+        self._refreshing = False
+        self._lock = threading.Lock()
+
+    def read_status(self) -> PowerStatus:
+        now = time.monotonic()
+        should_refresh = False
+        with self._lock:
+            stale = (now - self._updated_at) >= self._refresh_interval_s
+            should_refresh = stale and not self._refreshing
+            if should_refresh:
+                self._refreshing = True
+            status = self._status
+        if should_refresh:
+            thread = threading.Thread(target=self._refresh, daemon=True)
+            thread.start()
+        return status
+
+    def _refresh(self) -> None:
+        try:
+            status = self._reader.read_status()
+        except Exception as exc:
+            status = PowerStatus(None, None, "power", False, f"power degraded: {exc}")
+        previous = self._status
+        with self._lock:
+            self._status = status
+            self._updated_at = time.monotonic()
+            self._refreshing = False
+        if status != previous and callable(self._on_update):
+            self._on_update(status)
 
 
 class RuntimeRunner:
@@ -561,9 +609,10 @@ def _resolve_power(config: RuntimeConfig) -> tuple[Any, CapabilityState]:
     if adapter == "pisugar":
         power = PiSugarStatus(
             mode=config.pisugar_mode,
+            socket_path=config.pisugar_socket_path,
             host=config.pisugar_host,
             port=config.pisugar_port,
-            command=config.pisugar_command,
+            sysfs_root=config.pisugar_sysfs_root,
         )
         status = power.read_status()
         if status.available:

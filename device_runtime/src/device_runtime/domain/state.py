@@ -33,6 +33,7 @@ class DeviceSnapshot:
     device_state: DeviceState = DeviceState.STANDBY
     remote_ui_state: UiState = UiState.STANDBY
     listening_active: bool = False
+    audio_outbound_active: bool = False
     playback_active: bool = False
     turn_id: str | None = None
     transcript: str = ""

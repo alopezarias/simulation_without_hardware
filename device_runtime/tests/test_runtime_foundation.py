@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -18,7 +20,7 @@ from device_runtime.application.services import DiagnosticsService, DisplayModel
 from device_runtime.domain.capabilities import CapabilityState, CapabilityStatus, DeviceCapabilities
 from device_runtime.domain.events import DeviceState
 from device_runtime.domain.state import DeviceSnapshot
-from device_runtime.entrypoints.raspi_main import RuntimeBootstrap, RuntimeRunner, build_hello_payload, build_runner, build_runtime
+from device_runtime.entrypoints.raspi_main import CachedPowerStatus, RuntimeBootstrap, RuntimeObserver, RuntimeRunner, build_hello_payload, build_runner, build_runtime
 from device_runtime.infrastructure.audio.null_audio import NullAudioCapture
 from device_runtime.infrastructure.display.null_display import NullDisplay
 from device_runtime.infrastructure.input.null_button import NullButton
@@ -35,6 +37,7 @@ def test_runtime_config_loads_minimal_environment() -> None:
     assert config.device_id == "raspi-1"
     assert config.ws_url == "ws://localhost/ws"
     assert config.transport_adapter == "websocket"
+    assert config.button_long_press_ms == 400
 
 
 def test_runtime_config_accepts_vendor_driver_path_and_backlight() -> None:
@@ -49,6 +52,22 @@ def test_runtime_config_accepts_vendor_driver_path_and_backlight() -> None:
 
     assert config.whisplay_driver_path == "~/Whisplay/Driver"
     assert config.whisplay_backlight == 60
+
+
+def test_runtime_config_accepts_pisugar_socket_and_sysfs_overrides() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_PISUGAR_MODE": "uds",
+            "DEVICE_PISUGAR_SOCKET_PATH": "/run/pisugar.sock",
+            "DEVICE_PISUGAR_SYSFS_ROOT": "/tmp/power_supply",
+        }
+    )
+
+    assert config.pisugar_mode == "uds"
+    assert config.pisugar_socket_path == "/run/pisugar.sock"
+    assert config.pisugar_sysfs_root == "/tmp/power_supply"
 
 
 def test_runtime_config_implicitly_enables_whisplay_bundle_when_display_uses_vendor_adapter() -> None:
@@ -196,10 +215,13 @@ def test_display_model_service_builds_incoming_call_view() -> None:
     assert model.focus_label == "incoming_call"
     assert model.warnings == ["audio_in unavailable"]
     assert model.scene == "incoming-call"
-    assert model.battery_label == "BAT 78% CHG"
+    assert model.status_icon == "IN"
+    assert model.battery_label == "78%+"
+    assert model.battery_percent == 78
     assert model.network_label == "NET CONNECTED"
     assert model.center_title == "Incoming call"
     assert model.center_body == "Hold to answer"
+    assert model.center_hint == "Release to speak"
 
 
 def test_experience_service_builds_screen_and_rgb_from_single_snapshot() -> None:
@@ -210,7 +232,7 @@ def test_experience_service_builds_screen_and_rgb_from_single_snapshot() -> None
     experience = ExperienceService().build(snapshot, PowerStatus(51.0, False, "pisugar", True, "ok"))
 
     assert experience.screen.scene == "calling"
-    assert experience.rgb_signal.state == "calling"
+    assert experience.rgb_signal.state == "off"
     assert experience.power.battery_percent == 51.0
 
 
@@ -218,22 +240,82 @@ def test_rgb_policy_prefers_disconnected_over_ready_state() -> None:
     snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     signal = RgbPolicyService().select(snapshot, PowerStatus(None, None, "pisugar", False, "offline"))
 
-    assert signal.state == "disconnected"
-    assert signal.style == "pulse"
-    assert signal.color == (64, 196, 255)
+    assert signal.state == "off"
+    assert signal.style == "solid"
+    assert signal.color == (0, 0, 0)
 
 
-def test_rgb_policy_uses_vivid_ready_and_listening_colors() -> None:
+def test_rgb_policy_only_lights_for_audio_outbound_and_incoming_call() -> None:
     snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
     snapshot.connected = True
 
     ready = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
-    snapshot.device_state = DeviceState.LISTENING
-    snapshot.listening_active = True
-    listening = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
+    snapshot.audio_outbound_active = True
+    sending = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
+    snapshot.audio_outbound_active = False
+    snapshot.device_state = DeviceState.INCOMING_CALL
+    incoming = RgbPolicyService().select(snapshot, PowerStatus(80.0, False, "pisugar", True, "ok"))
 
-    assert ready.color == (56, 231, 109)
-    assert listening.color == (255, 214, 10)
+    assert ready.color == (0, 0, 0)
+    assert sending.state == "audio_outbound"
+    assert sending.color == (255, 214, 10)
+    assert incoming.state == "incoming_call"
+
+
+def test_cached_power_status_returns_last_value_without_blocking_every_publish() -> None:
+    calls = 0
+
+    class FakePower:
+        def read_status(self) -> PowerStatus:
+            nonlocal calls
+            calls += 1
+            return PowerStatus(63.0, False, "pisugar", True, "ok")
+
+    cache = CachedPowerStatus(FakePower(), refresh_interval_s=60.0)
+    first = cache.read_status()
+    for _ in range(40):
+        if calls:
+            break
+        asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.01))
+    second = cache.read_status()
+
+    assert first.available is False
+    assert second.battery_percent == 63.0
+    assert calls == 1
+
+
+def test_runtime_observer_repaints_when_background_battery_refresh_arrives() -> None:
+    class DelayedPower:
+        def __init__(self) -> None:
+            self.ready = threading.Event()
+
+        def read_status(self) -> PowerStatus:
+            self.ready.wait(timeout=1.0)
+            return PowerStatus(63.0, False, "pisugar-uds", True, "ok")
+
+    runtime = build_runtime({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "ws://localhost/ws"})
+    display = FakeDisplay()
+    runtime.display = display
+    runtime.power = DelayedPower()
+    runtime.audio_capture = NullAudioCapture()
+    runtime.rgb = NullRgb()
+    observer = RuntimeObserver(runtime)
+    snapshot = runtime.snapshot
+    snapshot.connected = True
+    snapshot.diagnostics.transport_status = "connected"
+
+    observer.publish(snapshot)
+    assert len(display.rendered) == 1
+    assert display.rendered[0].battery_percent is None
+
+    runtime.power.ready.set()
+    for _ in range(100):
+        if len(display.rendered) >= 2:
+            break
+        time.sleep(0.01)
+
+    assert len(display.rendered) >= 2
+    assert display.rendered[-1].battery_percent == 63
 
 
 def test_diagnostics_service_derives_warnings_from_capabilities() -> None:
@@ -354,6 +436,27 @@ class FakePlayback:
 
     def end_session(self) -> None:
         self.stop_calls.append(False)
+
+
+class FakeDisplay:
+    def __init__(self) -> None:
+        self.rendered: list[object] = []
+        self.diagnostics: list[str] = []
+
+    def render(self, model: object) -> None:
+        self.rendered.append(model)
+
+    def show_diagnostic(self, line: str) -> None:
+        self.diagnostics.append(line)
+
+
+class FakePower:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def read_status(self) -> PowerStatus:
+        self.calls += 1
+        return PowerStatus(80.0, False, "pisugar", True, "ok")
 
 
 class AudioTransport(FakeTransport):
@@ -485,3 +588,23 @@ async def test_runtime_runner_downloads_audio_file_and_routes_pcm_to_playback() 
 
     assert playback.started_with == (24000, 1)
     assert playback.pushed == [b"pcmraw"]
+
+
+def test_runtime_observer_avoids_duplicate_diagnostic_render_path() -> None:
+    runtime = build_runtime({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "ws://localhost/ws"})
+    display = FakeDisplay()
+    power = FakePower()
+    runtime.display = display
+    runtime.power = power
+    runtime.audio_capture = NullAudioCapture()
+    runtime.rgb = NullRgb()
+    runtime.diagnostics = NullDiagnostics()
+    observer = RuntimeObserver(runtime)
+    snapshot = runtime.snapshot
+    snapshot.connected = True
+    snapshot.diagnostics.last_note = "transport ready"
+
+    observer.publish(snapshot)
+
+    assert len(display.rendered) >= 1
+    assert display.diagnostics == []

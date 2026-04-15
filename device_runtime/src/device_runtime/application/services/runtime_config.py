@@ -26,9 +26,10 @@ class RuntimeConfig:
     power_adapter: str = "none"
     rgb_adapter: str = "none"
     pisugar_mode: str = "auto"
+    pisugar_socket_path: str = "/tmp/pisugar-server.sock"
     pisugar_host: str = "127.0.0.1"
     pisugar_port: int = 8423
-    pisugar_command: str = ""
+    pisugar_sysfs_root: str = "/sys/class/power_supply"
     rgb_profile: str = "default"
     hardware_profile: str = DEFAULT_HARDWARE_PROFILE
     resolved_hardware_profile: str = GENERIC_HARDWARE_PROFILE
@@ -37,7 +38,7 @@ class RuntimeConfig:
     whisplay_backlight: int = 50
     reconnect_initial_ms: int = 1000
     reconnect_max_ms: int = 6000
-    button_long_press_ms: int = 900
+    button_long_press_ms: int = 400
     button_double_press_ms: int = 350
     audio_sample_rate: int = 16000
     audio_channels: int = 1
@@ -73,6 +74,8 @@ class RuntimeConfig:
             raise ValueError("DEVICE_RECONNECT_MAX_MS must be >= DEVICE_RECONNECT_INITIAL_MS")
         if self.pisugar_port <= 0:
             raise ValueError("DEVICE_PISUGAR_PORT must be > 0")
+        if self.pisugar_mode not in {"auto", "uds", "tcp", "sysfs", "none", "null", "disabled"}:
+            raise ValueError("DEVICE_PISUGAR_MODE must be one of: auto, uds, tcp, sysfs, none")
         if not 0 <= self.whisplay_backlight <= 100:
             raise ValueError("DEVICE_WHISPLAY_BACKLIGHT must be between 0 and 100")
         if self.button_long_press_ms <= 0:

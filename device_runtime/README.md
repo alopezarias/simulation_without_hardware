@@ -8,7 +8,7 @@ The preferred operator flow is intentionally simple: copy this folder to a clear
 
 ## Included deploy assets
 
-- `scripts/install_raspberry.sh` prepares the copied runtime folder itself (or another target folder if `DEVICE_RUNTIME_INSTALL_ROOT` is set), creates the virtualenv, seeds the local `.env`, and optionally installs the `systemd` unit.
+- `scripts/install_raspberry.sh` prepares the copied runtime folder itself (or another target folder if `DEVICE_RUNTIME_INSTALL_ROOT` is set), creates the virtualenv, seeds the local `.env`, installs/enables PiSugar support when `DEVICE_POWER_ADAPTER=pisugar`, and optionally installs the `systemd` unit.
 - `scripts/run_runtime.sh` is the manual launch wrapper used both by operators and by `systemd`.
 - `scripts/deploy_raspberry.sh` provides a repeatable copy/install/configure/restart flow from the development machine.
 - `scripts/smoke_check.sh` runs `device-runtime-smoke` on the Pi to verify packaging, config loading, and optional network reachability.
@@ -35,6 +35,8 @@ The preferred operator flow is intentionally simple: copy this folder to a clear
     - `DEVICE_AUDIO_OUT_CHUNK_MS=200`
     - `DEVICE_AUDIO_OUT_START_BUFFER_MS=1000`
     - `DEVICE_WHISPLAY_DRIVER_PATH=~/Whisplay/Driver` when using the real vendor screen/RGB stack
+   `scripts/install_raspberry.sh` now also tries to enable I2C, install `pisugar-server`, configure its model from `DEVICE_RUNTIME_PISUGAR_MODEL` (default `PiSugar 3`), and restart `pisugar-server.service` so battery reads work without extra commands.
+
 4. Start manually:
 
    ```bash
@@ -81,6 +83,7 @@ That flow may still use `/tmp` as staging, but it leaves the final runtime in a 
 - `./.env` inside the runtime folder is the default config source for both manual launch and `systemd`.
 - `DEVICE_WHISPLAY_DRIVER_PATH` can point at the vendor repo's `Driver/` folder; the launcher prepends it to `PYTHONPATH` and the runtime tries both `import whisplay` and `from WhisPlay import WhisPlayBoard` compatibility paths.
 - `scripts/install_raspberry.sh` now creates the venv with `--system-site-packages` by default so apt-installed vendor dependencies such as `spidev`, `RPi.GPIO`, and `Pillow` remain visible on Raspberry Pi. Set `DEVICE_RUNTIME_VENV_SYSTEM_SITE_PACKAGES=0` only if you want an isolated venv.
+- When `DEVICE_POWER_ADAPTER=pisugar`, `scripts/install_raspberry.sh` best-effort enables I2C, installs the vendor PiSugar packages through the official installer, enables/restarts `pisugar-server.service`, and leaves the runtime pointed at the default UDS/TCP endpoints that PiSugar exposes. Override `DEVICE_RUNTIME_PISUGAR_MODEL` before running the installer if your board is not `PiSugar 3`.
 - The runtime fails fast when `DEVICE_ID` or `DEVICE_WS_URL` is missing.
 - Hardware adapters degrade independently when optional native dependencies are absent.
 - The runtime remains a thin WebSocket client; no backend orchestration is moved onto the Pi.

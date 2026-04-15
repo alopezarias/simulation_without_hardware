@@ -74,6 +74,7 @@ class ProtocolService:
             return ProtocolUpdate(snapshot=current, note="assistant audio ended")
         if message_type == "error":
             current.remote_ui_state = current.device_state.value
+            current.audio_outbound_active = False
             detail = str(message.get("detail", "")).strip()
             current.diagnostics.last_error = detail or "backend error"
             return ProtocolUpdate(snapshot=current, note=detail or "backend error")
@@ -88,6 +89,7 @@ class ProtocolService:
     ) -> ProtocolUpdate:
         snapshot.connected = True
         snapshot.diagnostics.transport_status = "connected"
+        snapshot.audio_outbound_active = False
         snapshot.session_id = str(message.get("session_id", ""))
         remote_agent = str(message.get("active_agent", "")).strip()
         if remote_agent:
@@ -98,6 +100,8 @@ class ProtocolService:
 
     def _apply_ui_state(self, snapshot: DeviceSnapshot, message: dict[str, Any]) -> ProtocolUpdate:
         snapshot.remote_ui_state, warning = coerce_ui_state(message.get("state"), default=UiState.STANDBY)
+        if snapshot.remote_ui_state != UiState.LISTENING:
+            snapshot.audio_outbound_active = False
         if snapshot.remote_ui_state == UiState.INCOMING_CALL and snapshot.device_state != DeviceState.LISTENING:
             snapshot.device_state = DeviceState.INCOMING_CALL
         elif snapshot.remote_ui_state == UiState.STANDBY and snapshot.device_state == DeviceState.CONFIG:
@@ -110,6 +114,7 @@ class ProtocolService:
         return ProtocolUpdate(snapshot=snapshot)
 
     def _apply_incoming_call(self, snapshot: DeviceSnapshot) -> ProtocolUpdate:
+        snapshot.audio_outbound_active = False
         if snapshot.device_state != DeviceState.LISTENING:
             snapshot.device_state = DeviceState.INCOMING_CALL
         snapshot.remote_ui_state = UiState.INCOMING_CALL

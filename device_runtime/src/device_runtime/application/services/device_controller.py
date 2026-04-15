@@ -64,8 +64,14 @@ class DeviceController:
 
     async def flush_audio_capture(self, capture: AudioCapturePort, *, max_chunks: int = 6) -> int:
         if self._snapshot.device_state != DeviceState.LISTENING:
+            if self._snapshot.audio_outbound_active:
+                self._snapshot.audio_outbound_active = False
+                self._publish()
             return 0
         if not self._snapshot.turn_id or not capture.available:
+            if self._snapshot.audio_outbound_active:
+                self._snapshot.audio_outbound_active = False
+                self._publish()
             return 0
 
         sent = 0
@@ -78,6 +84,12 @@ class DeviceController:
                 continue
             await self._gateway.send_audio_chunk(self._snapshot.turn_id, payload)
             sent += 1
+        if sent > 0 and not self._snapshot.audio_outbound_active:
+            self._snapshot.audio_outbound_active = True
+            self._publish()
+        elif sent == 0 and self._snapshot.audio_outbound_active:
+            self._snapshot.audio_outbound_active = False
+            self._publish()
         return sent
 
     def _publish(self) -> None:
