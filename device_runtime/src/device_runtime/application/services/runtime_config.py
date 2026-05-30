@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from device_runtime.application.services.battery_display_service import (
+    DEFAULT_BATTERY_DISPLAY_CALIBRATION,
+    BatteryDisplayService,
+)
+
 
 DEVICE_WS_URL_ENV = "DEVICE_WS_URL"
 DEFAULT_HARDWARE_PROFILE = "auto"
@@ -30,6 +35,8 @@ class RuntimeConfig:
     pisugar_host: str = "127.0.0.1"
     pisugar_port: int = 8423
     pisugar_sysfs_root: str = "/sys/class/power_supply"
+    battery_display_calibration: str = DEFAULT_BATTERY_DISPLAY_CALIBRATION
+    battery_display_bar_count: int = 4
     rgb_profile: str = "default"
     hardware_profile: str = DEFAULT_HARDWARE_PROFILE
     resolved_hardware_profile: str = GENERIC_HARDWARE_PROFILE
@@ -76,6 +83,12 @@ class RuntimeConfig:
             raise ValueError("DEVICE_PISUGAR_PORT must be > 0")
         if self.pisugar_mode not in {"auto", "uds", "tcp", "sysfs", "none", "null", "disabled"}:
             raise ValueError("DEVICE_PISUGAR_MODE must be one of: auto, uds, tcp, sysfs, none")
+        if self.battery_display_bar_count <= 0:
+            raise ValueError("DEVICE_BATTERY_DISPLAY_BAR_COUNT must be > 0")
+        BatteryDisplayService(
+            calibration=self.battery_display_calibration,
+            bar_count=self.battery_display_bar_count,
+        )
         if not 0 <= self.whisplay_backlight <= 100:
             raise ValueError("DEVICE_WHISPLAY_BACKLIGHT must be between 0 and 100")
         if self.button_long_press_ms <= 0:

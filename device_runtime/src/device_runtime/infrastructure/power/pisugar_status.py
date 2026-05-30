@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-import re
 import socket
 from typing import Any, Callable
 
@@ -220,18 +219,22 @@ class PiSugarStatus:
         return payload
 
     def _parse_battery_percent(self, raw: str) -> float | None:
+        battery_keys = ("battery", "battery_level", "percent", "percentage", "capacity")
         payload = self._parse_payload(raw)
-        battery = self._pick_float(payload, ("battery", "battery_level", "percent", "percentage", "capacity"))
-        if battery is not None:
-            return max(0.0, min(100.0, battery))
+        if payload:
+            battery = self._pick_float(payload, battery_keys)
+            if battery is not None:
+                return max(0.0, min(100.0, battery))
+            # PiSugar may answer "battery: I2C not connected" when the board is
+            # unreachable. Don't mine digits out of the error string — the "2"
+            # in "I2C" would otherwise be accepted as 2% battery.
+            if any(key in payload for key in battery_keys):
+                return None
         text = raw.strip().rstrip("%")
         try:
             return max(0.0, min(100.0, float(text)))
         except ValueError:
-            match = re.search(r"(-?\d+(?:\.\d+)?)", text)
-            if match is None:
-                return None
-            return max(0.0, min(100.0, float(match.group(1))))
+            return None
 
     def _parse_bool(self, raw: str) -> bool | None:
         payload = self._parse_payload(raw)

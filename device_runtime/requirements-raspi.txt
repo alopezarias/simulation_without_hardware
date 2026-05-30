@@ -2,5 +2,10 @@
 gpiozero>=2,<3
 pyalsaaudio>=0.11,<1
 sounddevice>=0.4,<1
+# numpy is a soft requirement: WhisplayDisplay._rgb565_pixels uses a numpy
+# fast path (~30x faster than the pure-Python fallback) that the Raspberry
+# screen refresh depends on. Prefer apt-installed python3-numpy on Pi —
+# pip-compiling from source on a Pi takes ~30 min.
+numpy>=1.20
 # Install vendor-specific display bindings separately when they are available.
 # whisplay

@@ -8,6 +8,11 @@ from typing import Any, Callable
 from device_runtime.application.services.display_model_service import ScreenViewModel
 from device_runtime.infrastructure.whisplay_vendor import load_whisplay_vendor
 
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
 
 class WhisplayDisplay:
     _HORIZONTAL_SAFE_MARGIN = 16
@@ -138,8 +143,12 @@ class WhisplayDisplay:
                 "scene": str(getattr(model, "scene", "ready")),
                 "status_text": str(getattr(model, "status_text", getattr(model, "local_state", "-"))),
                 "battery_label": str(getattr(model, "battery_label", "--")),
+                "battery_icon": str(getattr(model, "battery_icon", "[----]")),
                 "battery_percent": getattr(model, "battery_percent", None),
+                "battery_percent_text": str(getattr(model, "battery_percent_text", "--")),
                 "battery_charging": bool(getattr(model, "battery_charging", False)),
+                "battery_bar_count": int(getattr(model, "battery_bar_count", 0)),
+                "battery_bar_total": int(getattr(model, "battery_bar_total", 4)),
             },
             "body": {
                 "scene": str(getattr(model, "scene", "ready")),
@@ -169,8 +178,12 @@ class WhisplayDisplay:
             "connected": bool(getattr(model, "connected", False)),
             "network_label": str(getattr(model, "network_label", "NET --")),
             "battery_label": str(getattr(model, "battery_label", "--")),
+            "battery_icon": str(getattr(model, "battery_icon", "[----]")),
             "battery_percent": getattr(model, "battery_percent", None),
+            "battery_percent_text": str(getattr(model, "battery_percent_text", "--")),
             "battery_charging": bool(getattr(model, "battery_charging", False)),
+            "battery_bar_count": int(getattr(model, "battery_bar_count", 0)),
+            "battery_bar_total": int(getattr(model, "battery_bar_total", 4)),
             "diagnostics_label": str(getattr(model, "diagnostics_label", "")),
             "header_badges": list(getattr(model, "header_badges", [])),
             "footer": footer,
@@ -258,6 +271,14 @@ class WhisplayDisplay:
 
     def _rgb565_pixels(self, image: Any) -> list[int]:
         raw = image.convert("RGB").tobytes()
+        # Hot path on Raspberry: a 240x280 region is ~67k pixels, and the per-
+        # pixel Python loop below takes hundreds of ms on a Pi. numpy collapses
+        # it to a handful of vector ops (~30x faster). Pure-Python fallback
+        # below preserves correctness when numpy isn't installed.
+        if _np is not None:
+            arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(-1, 3).astype(_np.uint16)
+            rgb565 = ((arr[:, 0] & 0xF8) << 8) | ((arr[:, 1] & 0xFC) << 3) | (arr[:, 2] >> 3)
+            return list(rgb565.byteswap().tobytes())
         pixels = bytearray(len(raw) // 3 * 2)
         target_index = 0
         for index in range(0, len(raw), 3):
@@ -354,13 +375,12 @@ class WhisplayDisplay:
 
     def _draw_battery(self, draw: Any, width: int, height: int, frame: dict[str, Any], *, font: Any) -> None:
         percent = frame.get("battery_percent")
-        charging = bool(frame.get("battery_charging", False))
         scene = str(frame.get("scene", "ready"))
         accent = self._scene_accent(scene)
         body_width = 28
         body_height = 14
         safe_margin = self._safe_margin(width)
-        label = str(frame.get("battery_label", "--"))
+        label = str(frame.get("battery_percent_text", frame.get("battery_label", "--")))
         label = self._fit_text(draw, label, font, max_width=max(18, width // 4))
         label_width = self._text_width(draw, label, font)
         body_x = max(safe_margin, width - label_width - body_width - 22 - safe_margin)
@@ -368,11 +388,15 @@ class WhisplayDisplay:
         draw.rounded_rectangle((body_x, body_y, body_x + body_width, body_y + body_height), radius=3, outline=(226, 232, 240), width=2)
         draw.rectangle((body_x + body_width, body_y + 4, body_x + body_width + 3, body_y + 10), fill=(226, 232, 240))
         if isinstance(percent, int):
-            fill_width = max(3, int((body_width - 4) * min(100, max(0, percent)) / 100))
-            draw.rounded_rectangle((body_x + 2, body_y + 2, body_x + 2 + fill_width, body_y + body_height - 2), radius=2, fill=accent)
-            label = f"{percent}%"
-        if charging:
-            draw.text((body_x + body_width + 8, body_y - 1), "+", fill=accent, font=font)
+            segment_gap = 2
+            segment_count = max(1, int(frame.get("battery_bar_total", 4)))
+            filled_segments = max(0, min(segment_count, int(frame.get("battery_bar_count", 0))))
+            segment_width = max(3, (body_width - 4 - ((segment_count - 1) * segment_gap)) // segment_count)
+            for index in range(segment_count):
+                x0 = body_x + 2 + (index * (segment_width + segment_gap))
+                x1 = x0 + segment_width
+                fill = accent if index < filled_segments else (51, 65, 85)
+                draw.rounded_rectangle((x0, body_y + 2, x1, body_y + body_height - 2), radius=1, fill=fill)
         text_x = max(safe_margin, width - self._text_width(draw, label, font) - safe_margin)
         draw.text((text_x, body_y - 1), label, fill=(241, 245, 249), font=font)
 

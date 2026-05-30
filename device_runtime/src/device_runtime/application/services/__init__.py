@@ -1,5 +1,6 @@
 """Shared application services for the device runtime."""
 
+from device_runtime.application.services.battery_display_service import BatteryDisplayService
 from device_runtime.application.services.device_controller import DeviceController
 from device_runtime.application.services.device_state_machine import DeviceStateMachine, TransitionResult
 from device_runtime.application.services.diagnostics_service import DiagnosticsService, DiagnosticsSnapshot
@@ -12,6 +13,7 @@ from device_runtime.application.services.runtime_config import RuntimeConfig
 __all__ = [
     "DeviceController",
     "DeviceStateMachine",
+    "BatteryDisplayService",
     "DiagnosticsService",
     "DiagnosticsSnapshot",
     "DisplayModelService",

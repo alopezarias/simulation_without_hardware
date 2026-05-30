@@ -13,8 +13,10 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import urlopen
 
 from device_runtime.application.ports import BackendGateway, PowerStatus, StateObserver
+from device_runtime.application.services.battery_display_service import BatteryDisplayService
 from device_runtime.application.services.device_controller import DeviceController
 from device_runtime.application.services.diagnostics_service import DiagnosticsService
+from device_runtime.application.services.display_model_service import DisplayModelService
 from device_runtime.application.services.experience_service import ExperienceService
 from device_runtime.application.services.runtime_config import RuntimeConfig
 from device_runtime.domain.events import DeviceInputEvent, DeviceState
@@ -61,7 +63,14 @@ class MonotonicClock:
 class RuntimeObserver(StateObserver):
     def __init__(self, runtime: RuntimeBootstrap) -> None:
         self._runtime = runtime
-        self._experience_service = ExperienceService()
+        self._experience_service = ExperienceService(
+            display_model_service=DisplayModelService(
+                battery_display_service=BatteryDisplayService(
+                    calibration=runtime.config.battery_display_calibration,
+                    bar_count=runtime.config.battery_display_bar_count,
+                )
+            )
+        )
         self._was_listening = False
         self._last_snapshot = copy.deepcopy(runtime.snapshot)
         self._render_lock = threading.RLock()
@@ -231,6 +240,11 @@ class RuntimeRunner:
         status = status.strip()
         snapshot.diagnostics.transport_status = status or snapshot.diagnostics.transport_status
         snapshot.connected = status == "connected"
+        if status == "connected":
+            # DisplayModelService._scene returns "error" whenever last_error is
+            # truthy, so a stale disconnect message would keep the screen red
+            # forever after a successful reconnect.
+            snapshot.diagnostics.last_error = ""
         if status == "disconnected":
             snapshot.session_id = ""
             snapshot.remote_ui_state = UiState.STANDBY
