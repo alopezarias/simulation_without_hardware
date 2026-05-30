@@ -1,9 +1,9 @@
 services:
   backend:
-    image: ${DOCKERHUB_IMAGE:-anxdeveloper/note-taker-backend}:${IMAGE_TAG:-latest}
+    image: ${DOCKERHUB_BACKEND_IMAGE:-anxdeveloper/note-taker-backend}:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    ports:
-      - "${PORT:-8000}:8000"
+    expose:
+      - "8000"           # reachable within the docker network; not published to the host
     volumes:
       - ./data:/app/data
     env_file:
@@ -14,3 +14,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  frontend:
+    image: ${DOCKERHUB_FRONTEND_IMAGE:-anxdeveloper/note-taker-frontend}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy

@@ -5,10 +5,11 @@ import NotesFeed from './components/NotesFeed'
 import TypeFilter from './components/TypeFilter'
 import { useNotes } from './hooks/useNotes'
 import { useWebSocket } from './hooks/useWebSocket'
+import { resolveWsUrl } from './utils'
 
 const TOKEN_KEY = 'note_taker_token'
 const API_URL = import.meta.env.VITE_API_URL || ''
-const WS_URL = API_URL.replace(/^http/, 'ws') + '/ws/client'
+const WS_URL = resolveWsUrl(API_URL)
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '')

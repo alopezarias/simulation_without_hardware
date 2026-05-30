@@ -15,6 +15,20 @@ export const TYPE_FILTERS = [
   { value: 'dictation', label: 'Dictados' },
 ]
 
+/**
+ * Resolve the WebSocket URL for the backend.
+ *
+ * When apiUrl is set (e.g. "https://example.com") it produces
+ * "wss://example.com/ws/client".  When apiUrl is empty the page is served
+ * by nginx on the same origin, so we derive the WS URL from location —
+ * nginx proxies /ws/ to the backend.
+ */
+export function resolveWsUrl(apiUrl, { location: loc = globalThis.location } = {}) {
+  if (apiUrl) return apiUrl.replace(/^http/, 'ws') + '/ws/client'
+  const proto = loc?.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${loc?.host ?? 'localhost'}/ws/client`
+}
+
 export function timeAgo(isoString) {
   const diff = Date.now() - new Date(isoString).getTime()
   const minutes = Math.floor(diff / 60_000)
