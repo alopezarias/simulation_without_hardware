@@ -19,6 +19,18 @@ from backend.infrastructure.adapters.null_notifier import NullNotifier
 from backend.infrastructure.adapters.sqlite_note_repository import SqliteNoteRepository
 from backend.infrastructure.db.database import get_db
 
+# Classifiers are singletons: creating the Anthropic/OpenAI async client once
+# avoids re-establishing the underlying httpx connection pool per request.
+@lru_cache(maxsize=4)
+def _build_classifier(provider: str, model: str, api_key: str) -> ClassifierPort:
+    if provider == "anthropic":
+        from backend.infrastructure.adapters.anthropic_classifier import AnthropicClassifier
+        return AnthropicClassifier(api_key=api_key, model=model)
+    if provider == "openai":
+        from backend.infrastructure.adapters.openai_classifier import OpenAIClassifier
+        return OpenAIClassifier(api_key=api_key, model=model)
+    return NullClassifier()
+
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -46,8 +58,16 @@ def get_stt(s: Settings = Depends(get_settings)) -> SttPort:
     return get_whisper_stt(s.whisper_model, s.whisper_language)
 
 
-def get_classifier() -> ClassifierPort:
-    return NullClassifier()
+def get_classifier(s: Settings = Depends(get_settings)) -> ClassifierPort:
+    if not s.ai_classifier_enabled or s.ai_provider == "null":
+        return NullClassifier()
+    api_key = s.anthropic_api_key if s.ai_provider == "anthropic" else s.openai_api_key
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI_PROVIDER={s.ai_provider} but the corresponding API key is not set.",
+        )
+    return _build_classifier(s.ai_provider, s.effective_classifier_model(), api_key)
 
 
 def get_notifier() -> NotifierPort:

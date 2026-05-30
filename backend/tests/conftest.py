@@ -38,6 +38,14 @@ async def db_session(db_engine):
 
 # ── App + client fixtures ────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def clear_classifier_cache():
+    from backend.api.dependencies import _build_classifier
+    _build_classifier.cache_clear()
+    yield
+    _build_classifier.cache_clear()
+
+
 @pytest.fixture
 def app(db_session, tmp_path):
     from backend.api.app import create_app
