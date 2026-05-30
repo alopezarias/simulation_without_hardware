@@ -21,7 +21,9 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    from backend.api.routes.capture import router as capture_router
     from backend.api.routes.health import router as health_router
+    from backend.api.routes.notes import router as notes_router
 
     app = FastAPI(
         title="Note-Taker Backend",
@@ -29,6 +31,8 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
     app.include_router(health_router)
+    app.include_router(capture_router)
+    app.include_router(notes_router)
     return app
 
 
