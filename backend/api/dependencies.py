@@ -10,12 +10,12 @@ from backend.application.ports.audio_store import AudioStore
 from backend.application.ports.classifier_port import ClassifierPort
 from backend.application.ports.note_repository import NoteRepository
 from backend.application.ports.notifier_port import NotifierPort
+from backend.infrastructure.adapters.ws_notifier import ConnectionManager
 from backend.application.ports.stt_port import SttPort
 from backend.application.services.note_ingestion import NoteIngestionService
 from backend.config.settings import Settings, get_settings
 from backend.infrastructure.adapters.local_audio_store import LocalAudioStore
 from backend.infrastructure.adapters.null_classifier import NullClassifier
-from backend.infrastructure.adapters.null_notifier import NullNotifier
 from backend.infrastructure.adapters.sqlite_note_repository import SqliteNoteRepository
 from backend.infrastructure.db.database import get_db
 
@@ -70,8 +70,18 @@ def get_classifier(s: Settings = Depends(get_settings)) -> ClassifierPort:
     return _build_classifier(s.ai_provider, s.effective_classifier_model(), api_key)
 
 
-def get_notifier() -> NotifierPort:
-    return NullNotifier()
+def get_connection_manager() -> ConnectionManager:
+    from backend.infrastructure.adapters.ws_notifier import _default_manager
+
+    return _default_manager
+
+
+def get_notifier(
+    manager: ConnectionManager = Depends(get_connection_manager),
+) -> NotifierPort:
+    from backend.infrastructure.adapters.ws_notifier import WebSocketNotifier
+
+    return WebSocketNotifier(manager)
 
 
 def get_ingestion_service(
