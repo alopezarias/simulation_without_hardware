@@ -1,0 +1,7 @@
+# Automatic HTTPS via Let's Encrypt.
+# Set DOMAIN in .env (e.g. DOMAIN=notes.example.com).
+# Without DOMAIN, Caddy uses localhost with a local self-signed certificate.
+
+{$DOMAIN:localhost} {
+    reverse_proxy frontend:80
+}

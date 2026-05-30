@@ -3,7 +3,7 @@ services:
     image: ${DOCKERHUB_BACKEND_IMAGE:-anxdeveloper/note-taker-backend}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     expose:
-      - "8000"           # reachable within the docker network; not published to the host
+      - "8000"
     volumes:
       - ./data:/app/data
     env_file:
@@ -18,8 +18,28 @@ services:
   frontend:
     image: ${DOCKERHUB_FRONTEND_IMAGE:-anxdeveloper/note-taker-frontend}:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    ports:
-      - "${PORT:-80}:80"
+    expose:
+      - "80"
     depends_on:
       backend:
         condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"    # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # Let's Encrypt certificates
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    depends_on:
+      - frontend
+
+volumes:
+  caddy_data:
+  caddy_config:
