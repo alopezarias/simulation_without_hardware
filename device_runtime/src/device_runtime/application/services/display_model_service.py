@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from device_runtime.application.ports import PowerStatus
+from device_runtime.application.services.battery_display_service import BatteryDisplayService
 from device_runtime.domain.events import DeviceState
 from device_runtime.domain.state import DeviceSnapshot
 
@@ -36,21 +37,30 @@ class ScreenViewModel:
     footer: str
     header_badges: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    battery_icon: str = "[----]"
+    battery_percent_text: str = "--"
+    battery_raw_percent: float | None = None
+    battery_bar_count: int = 0
+    battery_bar_total: int = 4
 
 
 class DisplayModelService:
     """Creates a compact on-device screen model for Raspberry displays."""
 
+    def __init__(self, *, battery_display_service: BatteryDisplayService | None = None) -> None:
+        self._battery_display_service = battery_display_service or BatteryDisplayService()
+
     def build(self, snapshot: DeviceSnapshot, power: PowerStatus | None = None) -> ScreenViewModel:
         power_status = power or PowerStatus(None, None, "none", False, "")
+        battery_state = self._battery_display_service.build(power_status)
         scene = self._scene(snapshot)
         status_text, status_detail = self._status_copy(scene, snapshot)
         status_icon = self._status_icon(scene)
         diagnostics_label = self._diagnostics_label(snapshot, power_status)
-        header_badges = self._header_badges(snapshot, power_status)
+        header_badges = self._header_badges(snapshot, battery_state.label)
         network_label = header_badges[0] if header_badges else self._network_label(snapshot)
-        battery_percent = self._battery_percent(power_status)
-        battery_label = header_badges[1] if len(header_badges) > 1 else self._battery_label(power_status)
+        battery_percent = battery_state.display_percent
+        battery_label = header_badges[1] if len(header_badges) > 1 else battery_state.label
         transcript_preview = self._transcript_preview(snapshot, scene)
         assistant_preview = self._assistant_preview(snapshot, scene)
         center_title, center_body, center_hint = self._center_content(
@@ -89,6 +99,11 @@ class DisplayModelService:
             footer=self._footer(snapshot, scene, diagnostics_label),
             header_badges=header_badges,
             warnings=self._display_warnings(snapshot, power_status),
+            battery_icon=battery_state.icon,
+            battery_percent_text=battery_state.percent_text,
+            battery_raw_percent=battery_state.raw_percent,
+            battery_bar_count=battery_state.bars,
+            battery_bar_total=battery_state.bar_capacity,
         )
 
     def _scene(self, snapshot: DeviceSnapshot) -> str:
@@ -172,20 +187,8 @@ class DisplayModelService:
         status = snapshot.diagnostics.transport_status or ("connected" if snapshot.connected else "disconnected")
         return f"NET {status.upper()}"
 
-    def _battery_label(self, power: PowerStatus) -> str:
-        percent = self._battery_percent(power)
-        if percent is None:
-            return "--"
-        suffix = "+" if power.charging else ""
-        return f"{percent}%{suffix}"
-
-    def _battery_percent(self, power: PowerStatus) -> int | None:
-        if not power.available or power.battery_percent is None:
-            return None
-        return int(round(power.battery_percent))
-
-    def _header_badges(self, snapshot: DeviceSnapshot, power: PowerStatus) -> list[str]:
-        badges = [self._network_label(snapshot), self._battery_label(power)]
+    def _header_badges(self, snapshot: DeviceSnapshot, battery_label: str) -> list[str]:
+        badges = [self._network_label(snapshot), battery_label]
         return badges
 
     def _diagnostics_label(self, snapshot: DeviceSnapshot, power: PowerStatus) -> str:

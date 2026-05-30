@@ -16,7 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from device_runtime.application.ports import PowerStatus
-from device_runtime.application.services import DiagnosticsService, DisplayModelService, ExperienceService, RgbPolicyService
+from device_runtime.application.services import BatteryDisplayService, DiagnosticsService, DisplayModelService, ExperienceService, RgbPolicyService
 from device_runtime.domain.capabilities import CapabilityState, CapabilityStatus, DeviceCapabilities
 from device_runtime.domain.events import DeviceState
 from device_runtime.domain.state import DeviceSnapshot
@@ -68,6 +68,51 @@ def test_runtime_config_accepts_pisugar_socket_and_sysfs_overrides() -> None:
     assert config.pisugar_mode == "uds"
     assert config.pisugar_socket_path == "/run/pisugar.sock"
     assert config.pisugar_sysfs_root == "/tmp/power_supply"
+
+
+def test_runtime_config_accepts_battery_display_calibration_overrides() -> None:
+    config = load_runtime_config(
+        {
+            "DEVICE_ID": "raspi-1",
+            "DEVICE_WS_URL": "ws://localhost/ws",
+            "DEVICE_BATTERY_DISPLAY_CALIBRATION": "0:0,5:40,25:75,70:100",
+            "DEVICE_BATTERY_DISPLAY_BAR_COUNT": "5",
+        }
+    )
+
+    assert config.battery_display_calibration == "0:0,5:40,25:75,70:100"
+    assert config.battery_display_bar_count == 5
+
+
+def test_runtime_config_rejects_invalid_battery_display_bar_count() -> None:
+    with pytest.raises(ValueError, match="DEVICE_BATTERY_DISPLAY_BAR_COUNT"):
+        load_runtime_config(
+            {
+                "DEVICE_ID": "raspi-1",
+                "DEVICE_WS_URL": "ws://localhost/ws",
+                "DEVICE_BATTERY_DISPLAY_BAR_COUNT": "0",
+            }
+        )
+
+
+def test_runtime_config_rejects_invalid_battery_display_calibration() -> None:
+    with pytest.raises(ValueError, match="DEVICE_BATTERY_DISPLAY_CALIBRATION"):
+        load_runtime_config(
+            {
+                "DEVICE_ID": "raspi-1",
+                "DEVICE_WS_URL": "ws://localhost/ws",
+                "DEVICE_BATTERY_DISPLAY_CALIBRATION": "0:0,broken",
+            }
+        )
+
+
+def test_battery_display_service_calibrates_low_raw_pisugar_reading() -> None:
+    battery = BatteryDisplayService().build(PowerStatus(2.0, False, "pisugar", True, "ok"))
+
+    assert battery.raw_percent == 2.0
+    assert battery.display_percent == 50
+    assert battery.icon == "[##--]"
+    assert battery.label == "[##--] 50%"
 
 
 def test_runtime_config_implicitly_enables_whisplay_bundle_when_display_uses_vendor_adapter() -> None:
@@ -216,8 +261,10 @@ def test_display_model_service_builds_incoming_call_view() -> None:
     assert model.warnings == ["audio_in unavailable"]
     assert model.scene == "incoming-call"
     assert model.status_icon == "IN"
-    assert model.battery_label == "78%+"
-    assert model.battery_percent == 78
+    assert model.battery_label == "[####] 100%+"
+    assert model.battery_icon == "[####]"
+    assert model.battery_percent == 100
+    assert model.battery_raw_percent == 78.0
     assert model.network_label == "NET CONNECTED"
     assert model.center_title == "Incoming call"
     assert model.center_body == "Hold to answer"
@@ -315,7 +362,8 @@ def test_runtime_observer_repaints_when_background_battery_refresh_arrives() -> 
         time.sleep(0.01)
 
     assert len(display.rendered) >= 2
-    assert display.rendered[-1].battery_percent == 63
+    assert display.rendered[-1].battery_percent == 100
+    assert display.rendered[-1].battery_raw_percent == 63.0
 
 
 def test_diagnostics_service_derives_warnings_from_capabilities() -> None:
@@ -608,3 +656,65 @@ def test_runtime_observer_avoids_duplicate_diagnostic_render_path() -> None:
 
     assert len(display.rendered) >= 1
     assert display.diagnostics == []
+
+
+def test_runtime_runner_clears_last_error_on_reconnect() -> None:
+    # Without this, a stale disconnect detail keeps DisplayModelService stuck
+    # in the "error" scene (red screen) forever after a successful reconnect.
+    runtime = build_runtime({"DEVICE_ID": "raspi-1", "DEVICE_WS_URL": "ws://localhost/ws"})
+    runtime.display = NullDisplay()
+    runtime.button = NullButton()
+    runtime.audio_capture = NullAudioCapture()
+    runtime.audio_playback = FakePlayback()
+    runtime.rgb = NullRgb()
+    runtime.diagnostics = NullDiagnostics()
+    runner = RuntimeRunner(
+        RuntimeBootstrap(
+            config=runtime.config,
+            snapshot=runtime.snapshot,
+            display=NullDisplay(),
+            button=NullButton(),
+            audio_capture=NullAudioCapture(),
+            audio_playback=FakePlayback(),
+            power=NullPowerStatus(),
+            rgb=NullRgb(),
+            diagnostics=NullDiagnostics(),
+        ),
+        transport=FakeTransport(),
+    )
+
+    runner._handle_connection_event("disconnected", "received 1012 (service restart)")
+    assert runner.controller.snapshot.diagnostics.last_error == "received 1012 (service restart)"
+
+    runner._handle_connection_event("connected", None)
+    assert runner.controller.snapshot.diagnostics.last_error == ""
+    assert runner.controller.snapshot.connected is True
+
+
+def test_whisplay_rgb565_fast_and_slow_paths_match() -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+    from device_runtime.infrastructure.display import whisplay_display as wd
+    image = pil_image.new("RGB", (8, 4))
+    image.putdata([
+        (0, 0, 0), (255, 255, 255), (255, 0, 0), (0, 255, 0),
+        (0, 0, 255), (12, 34, 56), (200, 100, 50), (8, 8, 8),
+        (1, 2, 3), (255, 254, 253), (128, 128, 128), (64, 32, 16),
+        (199, 88, 77), (0, 128, 255), (255, 128, 0), (33, 66, 99),
+        (10, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120),
+        (130, 140, 150), (160, 170, 180), (190, 200, 210), (220, 230, 240),
+        (5, 5, 5), (95, 95, 95), (185, 185, 185), (245, 245, 245),
+        (15, 200, 75), (60, 60, 240), (210, 30, 90), (170, 10, 250),
+    ])
+    display = wd.WhisplayDisplay(driver=object())
+
+    original_np = wd._np
+    try:
+        wd._np = None
+        pure_pixels = display._rgb565_pixels(image)
+        wd._np = original_np
+        fast_pixels = display._rgb565_pixels(image)
+    finally:
+        wd._np = original_np
+
+    assert fast_pixels == pure_pixels
+    assert len(fast_pixels) == 8 * 4 * 2

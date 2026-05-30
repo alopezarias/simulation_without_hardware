@@ -198,6 +198,12 @@ python3 -m venv $VENV_ARGS "$INSTALL_ROOT/.venv"
 "$INSTALL_ROOT/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 "$INSTALL_ROOT/.venv/bin/python" -m pip install -r "$INSTALL_ROOT/requirements-base.txt"
 if [ "$INSTALL_RASPI_EXTRAS" = "1" ]; then
+  # numpy via apt first: pip-compiling numpy from source on a Pi takes ~30 min,
+  # apt has a precompiled wheel in seconds. The venv is --system-site-packages
+  # so the apt install becomes visible inside the venv automatically.
+  if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y python3-numpy >/dev/null 2>&1 || log_note "apt python3-numpy install skipped"
+  fi
   "$INSTALL_ROOT/.venv/bin/python" -m pip install -r "$INSTALL_ROOT/requirements-raspi.txt"
   "$INSTALL_ROOT/.venv/bin/python" -m pip install ".[raspi]" --no-build-isolation
 else

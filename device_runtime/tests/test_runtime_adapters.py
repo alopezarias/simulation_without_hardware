@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from device_runtime.application.ports import PowerStatus, RgbSignal
+from device_runtime.application.services.battery_display_service import BatteryDisplayService
 from device_runtime.application.services.display_model_service import DisplayModelService
 from device_runtime.application.services.device_controller import DeviceController
 from device_runtime.application.services.experience_service import ExperienceService
@@ -513,6 +514,22 @@ def test_display_model_service_surfaces_disconnected_battery_unavailable_copy() 
     assert model.warnings == []
 
 
+def test_display_model_service_supports_custom_battery_calibration() -> None:
+    snapshot = DeviceSnapshot(device_id="raspi-1", device_state=DeviceState.STANDBY)
+    snapshot.connected = True
+    snapshot.diagnostics.transport_status = "connected"
+    service = DisplayModelService(
+        battery_display_service=BatteryDisplayService(calibration="0:0,10:20,40:70,90:100")
+    )
+
+    model = service.build(snapshot, PowerStatus(40.0, False, "pisugar", True, "ok"))
+
+    assert model.battery_percent == 70
+    assert model.battery_raw_percent == 40.0
+    assert model.battery_label == "[###-] 70%"
+    assert model.battery_percent_text == "70%"
+
+
 def test_whisplay_display_skips_render_when_frame_does_not_change() -> None:
     driver = FakeLineDriver()
     display = WhisplayDisplay(driver=driver)
@@ -677,6 +694,34 @@ def test_pisugar_status_reads_sysfs_when_mode_is_explicit() -> None:
     assert status.source == "pisugar-sysfs"
     assert status.battery_percent == 64.0
     assert status.charging is False
+
+
+def test_pisugar_status_treats_i2c_error_response_as_unavailable() -> None:
+    # pisugar-server answers "battery: I2C not connected" when the I2C bus
+    # cannot reach the board. The parser must reject it, not mine the "2"
+    # out of "I2C" as a 2% battery reading.
+    sockets = iter([
+        FakeSocket(["battery: I2C not connected\n"]),
+    ])
+
+    def unix_socket_factory(_path: str, _timeout: float) -> FakeSocket:
+        return next(sockets)
+
+    def socket_factory(_address: tuple[str, int], _timeout: float) -> socket.socket:
+        raise OSError("tcp should not be needed")
+
+    def file_reader(_path: str) -> str:
+        raise FileNotFoundError("sysfs unavailable")
+
+    status = PiSugarStatus(
+        mode="auto",
+        unix_socket_factory=unix_socket_factory,
+        socket_factory=socket_factory,
+        file_reader=file_reader,
+    ).read_status()
+
+    assert status.available is False
+    assert status.battery_percent is None
 
 
 def test_pisugar_status_keeps_battery_when_tcp_charging_probe_fails() -> None:

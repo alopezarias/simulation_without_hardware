@@ -11,6 +11,7 @@ from device_runtime.application.services.runtime_config import (
     WHISPLAY_HARDWARE_PROFILE,
     RuntimeConfig,
 )
+from device_runtime.application.services.battery_display_service import DEFAULT_BATTERY_DISPLAY_CALIBRATION
 
 
 def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
@@ -32,6 +33,11 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         pisugar_host=values.get("DEVICE_PISUGAR_HOST", "127.0.0.1").strip() or "127.0.0.1",
         pisugar_port=_get_int(values, "DEVICE_PISUGAR_PORT", 8423),
         pisugar_sysfs_root=values.get("DEVICE_PISUGAR_SYSFS_ROOT", "/sys/class/power_supply").strip() or "/sys/class/power_supply",
+        battery_display_calibration=values.get(
+            "DEVICE_BATTERY_DISPLAY_CALIBRATION", DEFAULT_BATTERY_DISPLAY_CALIBRATION
+        ).strip()
+        or DEFAULT_BATTERY_DISPLAY_CALIBRATION,
+        battery_display_bar_count=_get_int(values, "DEVICE_BATTERY_DISPLAY_BAR_COUNT", 4),
         rgb_profile=values.get("DEVICE_RGB_PROFILE", "default").strip() or "default",
         hardware_profile=values.get("DEVICE_HARDWARE_PROFILE", DEFAULT_HARDWARE_PROFILE).strip().lower()
         or DEFAULT_HARDWARE_PROFILE,
