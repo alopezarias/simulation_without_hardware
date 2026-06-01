@@ -23,11 +23,13 @@ class HttpNoteCaptureGateway:
         self,
         api_url: str,
         *,
+        device_id: str = "",
         api_token: str = "",
         timeout_s: float = 30.0,
         retry_delays_s: tuple[float, ...] = (2.0, 4.0, 8.0),
     ) -> None:
         self._api_url = api_url.rstrip("/")
+        self._device_id = device_id
         self._api_token = api_token
         self._timeout_s = timeout_s
         self._retry_delays_s = retry_delays_s
@@ -41,6 +43,13 @@ class HttpNoteCaptureGateway:
         channels: int = 1,
     ) -> str:
         wav_bytes = _pcm_to_wav(audio_bytes, sample_rate=sample_rate, channels=channels)
+        return await self._upload_with_retry(wav_bytes, capture_mode)
+
+    async def upload_wav(self, wav_bytes: bytes, capture_mode: str) -> str:
+        """Upload already-encoded WAV bytes (used by the offline queue drain)."""
+        return await self._upload_with_retry(wav_bytes, capture_mode)
+
+    async def _upload_with_retry(self, wav_bytes: bytes, capture_mode: str) -> str:
         delays = self._retry_delays_s
         for attempt in range(len(delays) + 1):
             try:
@@ -49,12 +58,16 @@ class HttpNoteCaptureGateway:
                 if _is_client_error(exc) or attempt == len(delays):
                     raise
                 await asyncio.sleep(delays[attempt])
+        raise AssertionError("unreachable")  # satisfies type checker
 
     def _post_sync(self, wav_bytes: bytes, capture_mode: str) -> str:
         boundary = uuid.uuid4().hex
+        fields: dict[str, str] = {"capture_mode": capture_mode}
+        if self._device_id:
+            fields["device_id"] = self._device_id
         body = _build_multipart(
             boundary,
-            fields={"capture_mode": capture_mode},
+            fields=fields,
             file_field="audio",
             filename="audio.wav",
             file_data=wav_bytes,

@@ -45,6 +45,10 @@ class NoteTakerConfig:
     silence_timeout_s: float = 3.0     # seconds of silence that ends a wake-word recording
     max_recording_s: float = 60.0      # hard cap on any single recording
 
+    # ── offline queue ─────────────────────────────────────────────────────────
+    offline_queue_dir: str = "/tmp/notes_queue"
+    offline_queue_drain_interval_s: float = 30.0
+
     # ── misc ──────────────────────────────────────────────────────────────────
     config_warnings: tuple[str, ...] = ()
 

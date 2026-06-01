@@ -66,6 +66,7 @@ def _make_config(**overrides: Any) -> NoteTakerConfig:
 
 def _make_bootstrap(config: NoteTakerConfig | None = None, **overrides: Any) -> NoteTakerBootstrap:
     from device_runtime.infrastructure.audio.null_audio import NullAudioCapture
+    from device_runtime.infrastructure.capture.offline_queue import OfflineQueue
     from device_runtime.infrastructure.display.null_display import NullDisplay
     from device_runtime.infrastructure.input.null_button import NullButton
     from device_runtime.infrastructure.power.pisugar_status import NullPowerStatus
@@ -81,6 +82,7 @@ def _make_bootstrap(config: NoteTakerConfig | None = None, **overrides: Any) -> 
         rgb=NullRgb(),
         wake_word=NullWakeWord(),
         note_gateway=NullNoteCaptureGateway(),
+        offline_queue=OfflineQueue("/tmp/test_notes_queue"),
     )
     defaults.update(overrides)
     return NoteTakerBootstrap(**defaults)
@@ -583,6 +585,122 @@ class TestHttpNoteCaptureGatewayIntegration:
         gw = HttpNoteCaptureGateway("http://127.0.0.1:1", retry_delays_s=())
         with pytest.raises(RuntimeError):
             await gw.upload(_make_pcm(160), "manual")
+
+
+# ── OfflineQueue tests ────────────────────────────────────────────────────────
+
+class TestOfflineQueue:
+    """Unit tests for the offline audio queue (disk persistence + drain)."""
+
+    @pytest.fixture
+    def queue(self, tmp_path: Any) -> Any:
+        from device_runtime.infrastructure.capture.offline_queue import OfflineQueue
+        return OfflineQueue(str(tmp_path / "queue"))
+
+    _WAV = b"RIFF\x00\x00\x00\x00WAVEfmt "  # minimal fake WAV header bytes
+
+    def test_save_creates_file(self, queue: Any) -> None:
+        path = queue.save(self._WAV, "manual")
+        assert path.exists()
+        assert path.read_bytes() == self._WAV
+
+    def test_save_encodes_capture_mode_in_filename(self, queue: Any) -> None:
+        path = queue.save(self._WAV, "wake_word")
+        assert "wake_word" in path.name
+
+    def test_pending_returns_empty_when_queue_dir_missing(self, tmp_path: Any) -> None:
+        from device_runtime.infrastructure.capture.offline_queue import OfflineQueue
+        q = OfflineQueue(str(tmp_path / "nonexistent"))
+        assert q.pending() == []
+        assert q.pending_count == 0
+
+    def test_pending_count_reflects_saved_files(self, queue: Any) -> None:
+        queue.save(self._WAV, "manual")
+        queue.save(self._WAV, "wake_word")
+        assert queue.pending_count == 2
+
+    def test_pending_returns_files_in_chronological_order(self, queue: Any) -> None:
+        p1 = queue.save(self._WAV, "manual")
+        p2 = queue.save(self._WAV, "wake_word")
+        pending = queue.pending()
+        assert pending[0].name <= pending[1].name  # alphabetical = chronological by ts prefix
+
+    @pytest.mark.asyncio
+    async def test_drain_uploads_queued_file(self, queue: Any) -> None:
+        queue.save(self._WAV, "manual")
+        uploads: list[tuple[bytes, str]] = []
+
+        async def upload_fn(wav: bytes, mode: str) -> str:
+            uploads.append((wav, mode))
+            return "note-id"
+
+        uploaded, failed = await queue.drain(upload_fn)
+        assert uploaded == 1
+        assert failed == 0
+        assert len(uploads) == 1
+        assert uploads[0][1] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_drain_deletes_file_on_success(self, queue: Any) -> None:
+        path = queue.save(self._WAV, "manual")
+
+        async def upload_fn(wav: bytes, mode: str) -> str:
+            return "ok"
+
+        await queue.drain(upload_fn)
+        assert not path.exists()
+        assert queue.pending_count == 0
+
+    @pytest.mark.asyncio
+    async def test_drain_keeps_file_on_failure(self, queue: Any) -> None:
+        queue.save(self._WAV, "manual")
+
+        async def upload_fn(wav: bytes, mode: str) -> str:
+            raise RuntimeError("backend unreachable")
+
+        uploaded, failed = await queue.drain(upload_fn)
+        assert uploaded == 0
+        assert failed == 1
+        assert queue.pending_count == 1  # file still there
+
+    @pytest.mark.asyncio
+    async def test_drain_processes_multiple_files(self, queue: Any) -> None:
+        for mode in ("manual", "wake_word", "manual"):
+            queue.save(self._WAV, mode)
+
+        uploaded_modes: list[str] = []
+
+        async def upload_fn(wav: bytes, mode: str) -> str:
+            uploaded_modes.append(mode)
+            return "ok"
+
+        uploaded, failed = await queue.drain(upload_fn)
+        assert uploaded == 3
+        assert failed == 0
+        assert sorted(uploaded_modes) == ["manual", "manual", "wake_word"]
+
+    @pytest.mark.asyncio
+    async def test_drain_continues_after_partial_failure(self, queue: Any) -> None:
+        queue.save(self._WAV, "manual")
+        queue.save(self._WAV, "wake_word")
+        calls = 0
+
+        async def upload_fn(wav: bytes, mode: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("first fails")
+            return "ok"
+
+        uploaded, failed = await queue.drain(upload_fn)
+        assert uploaded == 1
+        assert failed == 1
+
+    @pytest.mark.asyncio
+    async def test_drain_empty_queue_returns_zeros(self, queue: Any) -> None:
+        uploaded, failed = await queue.drain(lambda w, m: (_ for _ in ()).throw(RuntimeError()))
+        assert uploaded == 0
+        assert failed == 0
 
 
 # ── Retry tests ──────────────────────────────────────────────────────────────

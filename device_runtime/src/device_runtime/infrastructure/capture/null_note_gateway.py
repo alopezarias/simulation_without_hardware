@@ -37,3 +37,14 @@ class NullNoteCaptureGateway:
             )
         )
         return self._note_id
+
+    async def upload_wav(self, wav_bytes: bytes, capture_mode: str) -> str:
+        self.uploads.append(
+            CapturedUpload(
+                audio_bytes=wav_bytes,
+                capture_mode=capture_mode,
+                sample_rate=0,
+                channels=0,
+            )
+        )
+        return self._note_id

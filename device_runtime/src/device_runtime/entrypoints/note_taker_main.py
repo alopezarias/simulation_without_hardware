@@ -28,6 +28,7 @@ from device_runtime.infrastructure.audio.sounddevice_capture import (
 from device_runtime.infrastructure.capture.audio_buffer import AudioBuffer
 from device_runtime.infrastructure.capture.http_note_gateway import HttpNoteCaptureGateway
 from device_runtime.infrastructure.capture.null_note_gateway import NullNoteCaptureGateway
+from device_runtime.infrastructure.capture.offline_queue import OfflineQueue
 from device_runtime.infrastructure.config.note_taker_env_loader import load_note_taker_config
 from device_runtime.infrastructure.display.null_display import NullDisplay
 from device_runtime.infrastructure.display.whisplay_display import WhisplayDisplay
@@ -53,6 +54,7 @@ class NoteTakerBootstrap:
     rgb: Any
     wake_word: Any
     note_gateway: Any
+    offline_queue: OfflineQueue
 
 
 class NoteTakerRunner:
@@ -66,6 +68,7 @@ class NoteTakerRunner:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self._timeout_task: asyncio.Task[None] | None = None
+        self._drain_task: asyncio.Task[None] | None = None
 
     @property
     def state(self) -> NoteTakerState:
@@ -76,6 +79,7 @@ class NoteTakerRunner:
         if self._bt.wake_word.available:
             self._bt.wake_word.start(self._on_wake_word)
         self._bt.button.start(self._on_button_event)
+        self._drain_task = asyncio.create_task(self._offline_drain_loop())
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -101,6 +105,12 @@ class NoteTakerRunner:
         self._bt.button.stop()
         self._bt.audio_capture.stop()
         await self._cancel_timeout()
+        if self._drain_task is not None and not self._drain_task.done():
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except asyncio.CancelledError:
+                pass
 
     # ── event ingestion ───────────────────────────────────────────────────────
 
@@ -163,6 +173,10 @@ class NoteTakerRunner:
         if not pcm:
             logger.warning("note-taker: recording produced no audio; skipping upload")
             return
+        wav_bytes = self._buffer.to_wav_bytes(
+            sample_rate=self._bt.config.audio_sample_rate,
+            channels=self._bt.config.audio_channels,
+        )
         try:
             note_id = await self._bt.note_gateway.upload(
                 pcm,
@@ -172,7 +186,23 @@ class NoteTakerRunner:
             )
             logger.info("note-taker: uploaded note_id=%s mode=%s", note_id, capture_mode.value)
         except Exception as exc:
-            logger.error("note-taker: upload failed: %s", exc)
+            logger.error("note-taker: upload failed, queuing for retry: %s", exc)
+            self._bt.offline_queue.save(wav_bytes, capture_mode.value)
+
+    async def _offline_drain_loop(self) -> None:
+        interval = self._bt.config.offline_queue_drain_interval_s
+        while True:
+            await asyncio.sleep(interval)
+            if self._bt.offline_queue.pending_count == 0:
+                continue
+            try:
+                uploaded, failed = await self._bt.offline_queue.drain(
+                    self._bt.note_gateway.upload_wav
+                )
+                if uploaded:
+                    logger.info("offline_queue: drained %d note(s), %d still pending", uploaded, failed)
+            except Exception:
+                logger.exception("offline_queue: drain loop error")
 
     async def _drain_audio(self) -> None:
         if self._state.mode == NoteTakerMode.RECORDING:
@@ -204,6 +234,7 @@ def build_note_taker(env: dict[str, str] | None = None) -> NoteTakerBootstrap:
     rgb = _resolve_rgb(config, display=display)
     wake_word = _resolve_wake_word(config)
     note_gateway = _resolve_note_gateway(config)
+    offline_queue = OfflineQueue(config.offline_queue_dir)
     return NoteTakerBootstrap(
         config=config,
         display=display,
@@ -213,6 +244,7 @@ def build_note_taker(env: dict[str, str] | None = None) -> NoteTakerBootstrap:
         rgb=rgb,
         wake_word=wake_word,
         note_gateway=note_gateway,
+        offline_queue=offline_queue,
     )
 
 
@@ -304,6 +336,7 @@ def _resolve_wake_word(config: NoteTakerConfig) -> Any:
 def _resolve_note_gateway(config: NoteTakerConfig) -> Any:
     return HttpNoteCaptureGateway(
         config.note_api_url,
+        device_id=config.device_id,
         api_token=config.note_api_token,
     )
 

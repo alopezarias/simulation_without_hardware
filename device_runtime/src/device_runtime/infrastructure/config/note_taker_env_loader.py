@@ -39,6 +39,8 @@ def load_note_taker_config(env: Mapping[str, str] | None = None) -> NoteTakerCon
         audio_in_alsa_nonblock=_get_bool(values, "DEVICE_AUDIO_IN_ALSA_NONBLOCK", False),
         silence_timeout_s=_get_float(values, "DEVICE_SILENCE_TIMEOUT_S", 3.0),
         max_recording_s=_get_float(values, "DEVICE_MAX_RECORDING_S", 60.0),
+        offline_queue_dir=values.get("DEVICE_OFFLINE_QUEUE_DIR", "/tmp/notes_queue").strip() or "/tmp/notes_queue",
+        offline_queue_drain_interval_s=_get_float(values, "DEVICE_OFFLINE_QUEUE_DRAIN_INTERVAL_S", 30.0),
     )
     _resolve_hardware_profile(config)
     config.validate()
