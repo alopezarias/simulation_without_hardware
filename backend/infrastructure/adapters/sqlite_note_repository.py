@@ -57,12 +57,19 @@ class SqliteNoteRepository(NoteRepository):
         self,
         *,
         type_filter: str | None = None,
+        q: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> tuple[Sequence[Note], int]:
         base_q = select(NoteRow)
         if type_filter:
             base_q = base_q.where(NoteRow.type == type_filter)
+        if q:
+            pattern = f"%{q.lower()}%"
+            base_q = base_q.where(
+                func.lower(NoteRow.text).like(pattern)
+                | func.lower(NoteRow.summary).like(pattern)
+            )
 
         total: int = (
             await self._session.scalar(

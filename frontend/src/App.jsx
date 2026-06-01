@@ -3,6 +3,7 @@ import AuthGate from './components/AuthGate'
 import DeviceStatus from './components/DeviceStatus'
 import NotesFeed from './components/NotesFeed'
 import TypeFilter from './components/TypeFilter'
+import { useDebounce } from './hooks/useDebounce'
 import { useNotes } from './hooks/useNotes'
 import { useWebSocket } from './hooks/useWebSocket'
 import { resolveWsUrl } from './utils'
@@ -14,9 +15,11 @@ const WS_URL = resolveWsUrl(API_URL)
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '')
   const [typeFilter, setTypeFilter] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
   const [deviceMode, setDeviceMode] = useState(null)
 
-  const { notes, total, loading, error, addNote, removeNote } = useNotes(token, typeFilter)
+  const debouncedQuery = useDebounce(searchQuery, 300)
+  const { notes, total, loading, error, addNote, removeNote } = useNotes(token, typeFilter, debouncedQuery)
 
   const handleWsMessage = useCallback((msg) => {
     if (msg.event === 'note.created') addNote(msg.data)
@@ -58,10 +61,18 @@ export default function App() {
         </div>
       </header>
 
-      {/* Filters */}
+      {/* Filters + Search */}
       <div className="border-b border-gray-800 px-4 py-2">
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-2xl mx-auto flex items-center gap-3">
           <TypeFilter active={typeFilter} onChange={setTypeFilter} />
+          <input
+            type="search"
+            aria-label="Buscar notas"
+            placeholder="Buscar…"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            className="ml-auto w-40 sm:w-56 bg-gray-900 border border-gray-700 rounded-md px-3 py-1 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-gray-500"
+          />
         </div>
       </div>
 

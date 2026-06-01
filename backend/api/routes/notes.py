@@ -32,6 +32,7 @@ def _serialize(note: Note) -> dict:
 @router.get("")
 async def list_notes(
     type: str | None = Query(None, description="Filter by note type"),
+    q: str | None = Query(None, description="Full-text search across note text and summary"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=100),
     repo: NoteRepository = Depends(get_note_repo),
@@ -42,7 +43,7 @@ async def list_notes(
             status_code=422,
             detail=f"type must be one of {list(NoteType._value2member_map_)}",
         )
-    notes, total = await repo.list(type_filter=type, page=page, limit=limit)
+    notes, total = await repo.list(type_filter=type, q=q or None, page=page, limit=limit)
     pages = max(1, -(-total // limit))  # ceiling division
     return {
         "items": [_serialize(n) for n in notes],

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { deleteNote, fetchNotes } from '../api'
 
-export function useNotes(token, typeFilter) {
+export function useNotes(token, typeFilter, query = '') {
   const [notes, setNotes] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -12,7 +12,7 @@ export function useNotes(token, typeFilter) {
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchNotes(token, { type: typeFilter })
+      const data = await fetchNotes(token, { type: typeFilter, q: query || null })
       setNotes(data.items)
       setTotal(data.total)
     } catch (e) {
@@ -20,15 +20,17 @@ export function useNotes(token, typeFilter) {
     } finally {
       setLoading(false)
     }
-  }, [token, typeFilter])
+  }, [token, typeFilter, query])
 
   useEffect(() => { load() }, [load])
 
   const addNote = useCallback((note) => {
+    // In search mode new notes aren't guaranteed to match the query
+    if (query) return
     if (typeFilter && note.type !== typeFilter) return
     setNotes(prev => [note, ...prev])
     setTotal(prev => prev + 1)
-  }, [typeFilter])
+  }, [typeFilter, query])
 
   const removeNote = useCallback(async (noteId) => {
     try {

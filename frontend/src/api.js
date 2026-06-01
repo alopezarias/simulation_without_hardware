@@ -14,9 +14,10 @@ async function request(path, options = {}, token) {
   return res.json()
 }
 
-export async function fetchNotes(token, { type = null, page = 1, limit = 50 } = {}) {
+export async function fetchNotes(token, { type = null, q = null, page = 1, limit = 50 } = {}) {
   const params = new URLSearchParams({ page, limit })
   if (type) params.set('type', type)
+  if (q) params.set('q', q)
   return request(`/notes?${params}`, {}, token)
 }
 

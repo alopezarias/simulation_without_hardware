@@ -18,6 +18,7 @@ class NoteRepository(ABC):
         self,
         *,
         type_filter: str | None = None,
+        q: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> tuple[Sequence[Note], int]: ...
