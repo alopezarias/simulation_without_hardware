@@ -24,4 +24,13 @@ class NoteRepository(ABC):
     ) -> tuple[Sequence[Note], int]: ...
 
     @abstractmethod
+    async def update(
+        self,
+        note_id: str,
+        *,
+        text: str | None = None,
+        annotation: str | None = None,
+    ) -> Note | None: ...
+
+    @abstractmethod
     async def delete(self, note_id: str) -> bool: ...

@@ -126,4 +126,66 @@ describe('useNotes', () => {
     const url = fetch.mock.calls[1][0]
     expect(url).toContain('type=task')
   })
+
+  // ── Pagination ──────────────────────────────────────────────────────────────
+
+  it('hasMore is false when on last page', async () => {
+    stubFetch({ items: [makeNote('a')], total: 1, page: 1, pages: 1 })
+    const { result } = renderHook(() => useNotes(TOKEN, null))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.hasMore).toBe(false)
+  })
+
+  it('hasMore is true when more pages exist', async () => {
+    stubFetch({ items: [makeNote('a')], total: 25, page: 1, pages: 2 })
+    const { result } = renderHook(() => useNotes(TOKEN, null))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.hasMore).toBe(true)
+  })
+
+  it('loadMore appends notes to existing list', async () => {
+    stubFetch({ items: [makeNote('a')], total: 2, page: 1, pages: 2 })
+    const { result } = renderHook(() => useNotes(TOKEN, null))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ items: [makeNote('b')], total: 2, page: 2, pages: 2 }),
+    }))
+    await act(async () => result.current.loadMore())
+
+    expect(result.current.notes).toHaveLength(2)
+    expect(result.current.notes[0].id).toBe('a')
+    expect(result.current.notes[1].id).toBe('b')
+  })
+
+  it('loadMore sets hasMore false on last page', async () => {
+    stubFetch({ items: [makeNote('a')], total: 2, page: 1, pages: 2 })
+    const { result } = renderHook(() => useNotes(TOKEN, null))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ items: [makeNote('b')], total: 2, page: 2, pages: 2 }),
+    }))
+    await act(async () => result.current.loadMore())
+
+    expect(result.current.hasMore).toBe(false)
+  })
+
+  it('load resets page to 1 when filter changes', async () => {
+    stubFetch({ items: [makeNote('a')], total: 40, page: 1, pages: 2 })
+    const { result, rerender } = renderHook(
+      ({ filter }) => useNotes(TOKEN, filter),
+      { initialProps: { filter: null } }
+    )
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    stubFetch({ items: [makeNote('b')], total: 1, page: 1, pages: 1 })
+    rerender({ filter: 'task' })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    expect(result.current.hasMore).toBe(false)
+    expect(result.current.notes).toHaveLength(1)
+  })
 })

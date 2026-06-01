@@ -32,6 +32,7 @@ class Note:
     summary: str = ""
     audio_path: str = ""
     duration_s: float = 0.0
+    annotation: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def is_dictation(self) -> bool:

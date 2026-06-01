@@ -1,6 +1,6 @@
 import NoteCard from './NoteCard'
 
-export default function NotesFeed({ notes, loading, error, onDelete }) {
+export default function NotesFeed({ notes, loading, loadingMore, error, hasMore, onDelete, onEdit, onLoadMore }) {
   if (loading) {
     return (
       <div className="flex justify-center py-16 text-gray-500 text-sm">
@@ -29,8 +29,18 @@ export default function NotesFeed({ notes, loading, error, onDelete }) {
   return (
     <div className="flex flex-col gap-3">
       {notes.map(note => (
-        <NoteCard key={note.id} note={note} onDelete={onDelete} />
+        <NoteCard key={note.id} note={note} onDelete={onDelete} onEdit={onEdit} />
       ))}
+
+      {hasMore && (
+        <button
+          onClick={onLoadMore}
+          disabled={loadingMore}
+          className="mt-2 w-full py-2.5 rounded-xl border border-gray-800 text-gray-500 hover:text-gray-300 hover:border-gray-600 text-sm transition-colors disabled:opacity-40"
+        >
+          {loadingMore ? 'Cargando…' : 'Cargar más'}
+        </button>
+      )}
     </div>
   )
 }

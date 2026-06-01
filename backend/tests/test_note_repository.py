@@ -167,3 +167,51 @@ async def test_list_filter_no_match(db_session):
     notes, total = await repo.list(type_filter="task")
     assert total == 0
     assert notes == []
+
+
+# ── Update ────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_update_text(db_session):
+    repo = SqliteNoteRepository(db_session)
+    note = _note(text="original text")
+    await repo.save(note)
+    updated = await repo.update(note.id, text="new text")
+    assert updated is not None
+    assert updated.text == "new text"
+    assert (await repo.get(note.id)).text == "new text"
+
+
+@pytest.mark.asyncio
+async def test_update_annotation(db_session):
+    repo = SqliteNoteRepository(db_session)
+    note = _note()
+    await repo.save(note)
+    updated = await repo.update(note.id, annotation="my personal note")
+    assert updated.annotation == "my personal note"
+
+
+@pytest.mark.asyncio
+async def test_update_both_fields(db_session):
+    repo = SqliteNoteRepository(db_session)
+    note = _note(text="old")
+    await repo.save(note)
+    updated = await repo.update(note.id, text="new", annotation="context")
+    assert updated.text == "new"
+    assert updated.annotation == "context"
+
+
+@pytest.mark.asyncio
+async def test_update_nonexistent_returns_none(db_session):
+    repo = SqliteNoteRepository(db_session)
+    result = await repo.update("ghost-id", text="nope")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_save_preserves_annotation(db_session):
+    repo = SqliteNoteRepository(db_session)
+    note = _note(annotation="saved with annotation")
+    await repo.save(note)
+    retrieved = await repo.get(note.id)
+    assert retrieved.annotation == "saved with annotation"

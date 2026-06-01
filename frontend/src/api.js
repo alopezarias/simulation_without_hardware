@@ -21,6 +21,14 @@ export async function fetchNotes(token, { type = null, q = null, page = 1, limit
   return request(`/notes?${params}`, {}, token)
 }
 
+export async function updateNote(token, noteId, { text, annotation } = {}) {
+  return request(`/notes/${noteId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: text ?? null, annotation: annotation ?? null }),
+  }, token)
+}
+
 export async function deleteNote(token, noteId) {
   return request(`/notes/${noteId}`, { method: 'DELETE' }, token)
 }

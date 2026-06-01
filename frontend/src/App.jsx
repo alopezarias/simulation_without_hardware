@@ -19,7 +19,7 @@ export default function App() {
   const [deviceMode, setDeviceMode] = useState(null)
 
   const debouncedQuery = useDebounce(searchQuery, 300)
-  const { notes, total, loading, error, addNote, removeNote } = useNotes(token, typeFilter, debouncedQuery)
+  const { notes, total, hasMore, loading, loadingMore, error, addNote, editNote, loadMore, removeNote } = useNotes(token, typeFilter, debouncedQuery)
 
   const handleWsMessage = useCallback((msg) => {
     if (msg.event === 'note.created') addNote(msg.data)
@@ -79,7 +79,16 @@ export default function App() {
       {/* Feed */}
       <main className="flex-1 px-4 py-4">
         <div className="max-w-2xl mx-auto">
-          <NotesFeed notes={notes} loading={loading} error={error} onDelete={removeNote} />
+          <NotesFeed
+            notes={notes}
+            loading={loading}
+            loadingMore={loadingMore}
+            error={error}
+            hasMore={hasMore}
+            onDelete={removeNote}
+            onEdit={editNote}
+            onLoadMore={loadMore}
+          />
         </div>
       </main>
     </div>

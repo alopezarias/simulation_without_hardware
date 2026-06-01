@@ -23,6 +23,7 @@ def _to_domain(row: NoteRow) -> Note:
         summary=row.summary or "",
         audio_path=row.audio_path or "",
         duration_s=row.duration_s or 0.0,
+        annotation=row.annotation or "",
         capture_mode=CaptureMode(row.capture_mode or "wake_word"),
         created_at=row.created_at.replace(tzinfo=timezone.utc),
     )
@@ -43,6 +44,7 @@ class SqliteNoteRepository(NoteRepository):
             summary=note.summary,
             audio_path=note.audio_path,
             duration_s=note.duration_s,
+            annotation=note.annotation,
             capture_mode=note.capture_mode.value,
             created_at=note.created_at.replace(tzinfo=None),  # SQLite stores naive UTC
         )
@@ -86,6 +88,23 @@ class SqliteNoteRepository(NoteRepository):
         ).scalars().all()
 
         return [_to_domain(r) for r in rows], total
+
+    async def update(
+        self,
+        note_id: str,
+        *,
+        text: str | None = None,
+        annotation: str | None = None,
+    ) -> Note | None:
+        row = await self._session.get(NoteRow, note_id)
+        if row is None:
+            return None
+        if text is not None:
+            row.text = text
+        if annotation is not None:
+            row.annotation = annotation
+        await self._session.commit()
+        return _to_domain(row)
 
     async def delete(self, note_id: str) -> bool:
         row = await self._session.get(NoteRow, note_id)

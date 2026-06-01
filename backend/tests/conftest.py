@@ -109,7 +109,7 @@ async def authed_client(app):
 # ── WS app fixture (sync, for TestClient-based WS tests) ────────────────────
 
 @pytest.fixture
-def ws_app(tmp_path):
+def ws_app(tmp_path, monkeypatch):
     """App fixture with a real ConnectionManager for WebSocket integration tests."""
     from backend.api.app import create_app
     from backend.api.dependencies import (
@@ -122,20 +122,21 @@ def ws_app(tmp_path):
     from backend.infrastructure.adapters.null_classifier import NullClassifier
     from backend.infrastructure.adapters.null_stt import NullStt
     from backend.infrastructure.adapters.ws_notifier import ConnectionManager
-    from backend.infrastructure.db.database import Base, get_db, init_engine
+    from backend.infrastructure.db.database import get_db, init_engine
 
     import asyncio
-    import tempfile
-    import os
 
     # Use a temp file-based SQLite so TestClient (sync) can share it
     db_file = tmp_path / "test_ws.db"
     db_url = f"sqlite+aiosqlite:///{db_file}"
 
+    # Patch env so the app lifespan uses the same tmp db, not data/notes.db
+    monkeypatch.setenv("NOTES_DB_URL", db_url)
+
     _app = create_app()
     test_manager = ConnectionManager()
 
-    # Wire a real (file-based) DB and real manager; NullStt + NullClassifier
+    # Pre-create tables (lifespan will also call create_all, which is idempotent)
     async def _init_db():
         init_engine(db_url)
         from backend.infrastructure.db import note_model  # noqa

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from backend.api.dependencies import get_audio_store, get_note_repo, require_auth
 from backend.application.ports.audio_store import AudioStore
@@ -11,6 +12,11 @@ from backend.application.ports.note_repository import NoteRepository
 from backend.domain.note import Note, NoteType
 
 router = APIRouter(prefix="/notes", tags=["notes"])
+
+
+class NoteUpdateBody(BaseModel):
+    text: str | None = None
+    annotation: str | None = None
 
 
 def _serialize(note: Note) -> dict:
@@ -24,6 +30,7 @@ def _serialize(note: Note) -> dict:
         "summary": note.summary,
         "audio_path": note.audio_path,
         "duration_s": note.duration_s,
+        "annotation": note.annotation,
         "capture_mode": note.capture_mode.value,
         "created_at": note.created_at.isoformat(),
     }
@@ -60,6 +67,21 @@ async def get_note(
     _auth=Depends(require_auth),
 ) -> dict:
     note = await repo.get(note_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return _serialize(note)
+
+
+@router.put("/{note_id}")
+async def update_note(
+    note_id: str,
+    body: NoteUpdateBody,
+    repo: NoteRepository = Depends(get_note_repo),
+    _auth=Depends(require_auth),
+) -> dict:
+    if body.text is None and body.annotation is None:
+        raise HTTPException(status_code=422, detail="Provide at least one of: text, annotation")
+    note = await repo.update(note_id, text=body.text, annotation=body.annotation)
     if note is None:
         raise HTTPException(status_code=404, detail="Note not found")
     return _serialize(note)

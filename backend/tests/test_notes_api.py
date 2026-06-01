@@ -1,4 +1,4 @@
-"""Tests for GET /notes, GET /notes/{id}, DELETE /notes/{id}, GET /notes/{id}/audio."""
+"""Tests for GET /notes, GET /notes/{id}, PUT /notes/{id}, DELETE /notes/{id}, GET /notes/{id}/audio."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ async def test_get_note_has_all_fields(client):
     note_id = await _create_note(client)
     note = (await client.get(f"/notes/{note_id}")).json()
     required_fields = {"id", "device_id", "text", "type", "tags", "entities",
-                       "summary", "audio_path", "duration_s", "capture_mode", "created_at"}
+                       "summary", "audio_path", "duration_s", "annotation", "capture_mode", "created_at"}
     assert required_fields <= set(note.keys())
 
 
@@ -172,6 +172,62 @@ async def test_delete_note_removes_audio_file(client, tmp_path):
     assert audio_path.exists()
     await client.delete(f"/notes/{note_id}")
     assert not audio_path.exists()
+
+
+# ── PUT /notes/{id} ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_update_note_text(client):
+    note_id = await _create_note(client)
+    resp = await client.put(f"/notes/{note_id}", json={"text": "updated text"})
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "updated text"
+
+
+@pytest.mark.asyncio
+async def test_update_note_annotation(client):
+    note_id = await _create_note(client)
+    resp = await client.put(f"/notes/{note_id}", json={"annotation": "my note about this"})
+    assert resp.status_code == 200
+    assert resp.json()["annotation"] == "my note about this"
+
+
+@pytest.mark.asyncio
+async def test_update_note_both_fields(client):
+    note_id = await _create_note(client)
+    resp = await client.put(f"/notes/{note_id}", json={"text": "revised", "annotation": "context"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["text"] == "revised"
+    assert body["annotation"] == "context"
+
+
+@pytest.mark.asyncio
+async def test_update_note_not_found_returns_404(client):
+    resp = await client.put("/notes/nonexistent", json={"text": "nope"})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_note_no_fields_returns_422(client):
+    note_id = await _create_note(client)
+    resp = await client.put(f"/notes/{note_id}", json={})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_note_persists_on_get(client):
+    note_id = await _create_note(client)
+    await client.put(f"/notes/{note_id}", json={"annotation": "persisted"})
+    note = (await client.get(f"/notes/{note_id}")).json()
+    assert note["annotation"] == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_update_note_response_has_annotation_field(client):
+    note_id = await _create_note(client)
+    note = (await client.get(f"/notes/{note_id}")).json()
+    assert "annotation" in note
 
 
 # ── GET /notes/{id}/audio ─────────────────────────────────────────────────────

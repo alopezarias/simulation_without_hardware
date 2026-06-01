@@ -20,5 +20,6 @@ class NoteRow(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     audio_path: Mapped[str] = mapped_column(Text, default="")
     duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    annotation: Mapped[str] = mapped_column(Text, default="")
     capture_mode: Mapped[str] = mapped_column(String(32), default="wake_word")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
