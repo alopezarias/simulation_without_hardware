@@ -142,7 +142,7 @@ def ws_app(tmp_path):
         from backend.infrastructure.db.database import create_tables
         await create_tables()
 
-    asyncio.get_event_loop().run_until_complete(_init_db())
+    asyncio.run(_init_db())
 
     async def _override_db():
         from backend.infrastructure.db.database import get_session_factory
