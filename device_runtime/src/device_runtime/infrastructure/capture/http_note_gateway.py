@@ -12,7 +12,12 @@ from urllib.request import Request, urlopen
 
 
 class HttpNoteCaptureGateway:
-    """Converts raw PCM to WAV and POSTs it to the backend using stdlib urllib."""
+    """Converts raw PCM to WAV and POSTs it to the backend using stdlib urllib.
+
+    On transient server-side (5xx) or network errors the upload is retried up to
+    len(retry_delays_s) times.  Client errors (4xx) are never retried.
+    Default retry schedule: 2 s → 4 s → 8 s (3 retries, 4 total attempts).
+    """
 
     def __init__(
         self,
@@ -20,10 +25,12 @@ class HttpNoteCaptureGateway:
         *,
         api_token: str = "",
         timeout_s: float = 30.0,
+        retry_delays_s: tuple[float, ...] = (2.0, 4.0, 8.0),
     ) -> None:
         self._api_url = api_url.rstrip("/")
         self._api_token = api_token
         self._timeout_s = timeout_s
+        self._retry_delays_s = retry_delays_s
 
     async def upload(
         self,
@@ -34,11 +41,14 @@ class HttpNoteCaptureGateway:
         channels: int = 1,
     ) -> str:
         wav_bytes = _pcm_to_wav(audio_bytes, sample_rate=sample_rate, channels=channels)
-        return await asyncio.to_thread(
-            self._post_sync,
-            wav_bytes,
-            capture_mode,
-        )
+        delays = self._retry_delays_s
+        for attempt in range(len(delays) + 1):
+            try:
+                return await asyncio.to_thread(self._post_sync, wav_bytes, capture_mode)
+            except RuntimeError as exc:
+                if _is_client_error(exc) or attempt == len(delays):
+                    raise
+                await asyncio.sleep(delays[attempt])
 
     def _post_sync(self, wav_bytes: bytes, capture_mode: str) -> str:
         boundary = uuid.uuid4().hex
@@ -71,6 +81,11 @@ class HttpNoteCaptureGateway:
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _is_client_error(exc: RuntimeError) -> bool:
+    """Return True for 4xx HTTP errors (non-retryable)."""
+    return "HTTP 4" in str(exc)
+
 
 def _pcm_to_wav(pcm_bytes: bytes, *, sample_rate: int, channels: int) -> bytes:
     buf = io.BytesIO()

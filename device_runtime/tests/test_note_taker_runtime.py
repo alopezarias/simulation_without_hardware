@@ -572,7 +572,7 @@ class TestHttpNoteCaptureGatewayIntegration:
     async def test_upload_raises_on_http_error(self) -> None:
         server, port = self._start_server(b"Server Error", status_code=500)
         try:
-            gw = HttpNoteCaptureGateway(f"http://127.0.0.1:{port}")
+            gw = HttpNoteCaptureGateway(f"http://127.0.0.1:{port}", retry_delays_s=())
             with pytest.raises(RuntimeError, match="HTTP 500"):
                 await gw.upload(_make_pcm(160), "manual")
         finally:
@@ -580,9 +580,150 @@ class TestHttpNoteCaptureGatewayIntegration:
 
     @pytest.mark.asyncio
     async def test_upload_raises_on_connection_refused(self) -> None:
-        gw = HttpNoteCaptureGateway("http://127.0.0.1:1")  # port 1 = refused
+        gw = HttpNoteCaptureGateway("http://127.0.0.1:1", retry_delays_s=())
         with pytest.raises(RuntimeError):
             await gw.upload(_make_pcm(160), "manual")
+
+
+# ── Retry tests ──────────────────────────────────────────────────────────────
+
+class TestHttpNoteCaptureGatewayRetry:
+    """Verify exponential-backoff retry behaviour using a local HTTP server."""
+
+    def _start_flaky_server(
+        self, fail_count: int, fail_status: int = 503, success_body: bytes = b'{"note_id":"ok"}'
+    ) -> tuple[HTTPServer, int, type]:
+        """Server that returns fail_status for the first `fail_count` requests, then 202."""
+
+        class Handler(BaseHTTPRequestHandler):
+            calls: int = 0
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                Handler.calls += 1
+                if Handler.calls <= fail_count:
+                    self.send_response(fail_status)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b"error")
+                else:
+                    self.send_response(202)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(success_body)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, server.server_address[1], Handler
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_after_one_transient_failure(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=1)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.0, 0.0, 0.0)
+            )
+            note_id = await gw.upload(_make_pcm(160), "manual")
+            assert note_id == "ok"
+            assert Handler.calls == 2  # 1 failure + 1 success
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_after_two_transient_failures(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=2)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.0, 0.0, 0.0)
+            )
+            note_id = await gw.upload(_make_pcm(160), "manual")
+            assert note_id == "ok"
+            assert Handler.calls == 3
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_raises_after_all_attempts(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=99)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.0, 0.0, 0.0)
+            )
+            with pytest.raises(RuntimeError, match="HTTP 503"):
+                await gw.upload(_make_pcm(160), "manual")
+            assert Handler.calls == 4  # 1 initial + 3 retries
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_4xx_client_error(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=99, fail_status=422)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.0, 0.0, 0.0)
+            )
+            with pytest.raises(RuntimeError, match="HTTP 422"):
+                await gw.upload(_make_pcm(160), "manual")
+            assert Handler.calls == 1  # no retries for client errors
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_401_unauthorized(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=99, fail_status=401)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.0, 0.0, 0.0)
+            )
+            with pytest.raises(RuntimeError, match="HTTP 401"):
+                await gw.upload(_make_pcm(160), "manual")
+            assert Handler.calls == 1
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_retry_uses_correct_delays(self) -> None:
+        """asyncio.sleep is called with each delay value in order."""
+        server, port, _ = self._start_flaky_server(fail_count=99)
+        slept: list[float] = []
+
+        async def fake_sleep(t: float) -> None:
+            slept.append(t)
+
+        import unittest.mock as mock
+
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=(0.1, 0.2, 0.3)
+            )
+            with mock.patch("asyncio.sleep", side_effect=fake_sleep):
+                with pytest.raises(RuntimeError):
+                    await gw.upload(_make_pcm(160), "manual")
+            assert slept == [0.1, 0.2, 0.3]
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_zero_retries_raises_immediately(self) -> None:
+        server, port, Handler = self._start_flaky_server(fail_count=99)
+        try:
+            gw = HttpNoteCaptureGateway(
+                f"http://127.0.0.1:{port}", retry_delays_s=()
+            )
+            with pytest.raises(RuntimeError):
+                await gw.upload(_make_pcm(160), "manual")
+            assert Handler.calls == 1
+        finally:
+            server.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_default_retry_delays_are_2_4_8(self) -> None:
+        gw = HttpNoteCaptureGateway("http://127.0.0.1:1")
+        assert gw._retry_delays_s == (2.0, 4.0, 8.0)
 
 
 # ── NoteTakerRunner tests ─────────────────────────────────────────────────────
