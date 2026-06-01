@@ -108,3 +108,29 @@ class Clock(Protocol):
 
 class StateObserver(Protocol):
     def publish(self, snapshot: DeviceSnapshot) -> None: ...
+
+
+class WakeWordPort(Protocol):
+    """Passive wake-word detection; fires callback on detection, then stops."""
+
+    def start(self, on_wake: Callable[[], None]) -> None: ...
+
+    def stop(self) -> None: ...
+
+    @property
+    def available(self) -> bool: ...
+
+
+class NoteCaptureGateway(Protocol):
+    """Posts audio to the note-taker backend."""
+
+    async def upload(
+        self,
+        audio_bytes: bytes,
+        capture_mode: str,
+        *,
+        sample_rate: int = 16000,
+        channels: int = 1,
+    ) -> str:
+        """Upload WAV audio. Returns note_id string (may be empty on failure)."""
+        ...

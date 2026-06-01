@@ -26,6 +26,7 @@ raspi = [
 [project.scripts]
 device-runtime = "device_runtime.entrypoints.raspi_main:main"
 device-runtime-smoke = "device_runtime.entrypoints.smoke:main"
+device-note-taker = "device_runtime.entrypoints.note_taker_main:main"
 
 [tool.setuptools]
 include-package-data = true

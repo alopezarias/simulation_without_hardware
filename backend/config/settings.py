@@ -1,68 +1,63 @@
-"""Runtime configuration for the backend application."""
-
 from __future__ import annotations
 
-import os
-from hashlib import sha1
-from dataclasses import dataclass
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "true" if default else "false").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
+    # Server
+    host: str = "0.0.0.0"
+    port: int = 8000
+    log_level: str = "INFO"
+    app_version: str = "0.1.0"
 
-@dataclass(slots=True)
-class BackendSettings:
-    enable_fake_audio: bool
-    loopback_audio_enabled: bool
-    loopback_chunk_ms: int
-    audio_reply_mode: str
-    outbound_call_greeting: str
-    device_auth_token: str
-    available_agents: list[str]
-    allowed_device_ids: set[str]
-    log_level: str
-    playback_asset_ttl_s: int
+    # Database
+    notes_db_url: str = "sqlite+aiosqlite:///data/notes.db"
 
-    @property
-    def agent_catalog_version(self) -> str:
-        payload = "\n".join(self.available_agents).encode("utf-8")
-        return sha1(payload).hexdigest()[:12]
+    # Audio storage
+    notes_audio_dir: str = "data/audio"
+    notes_audio_retention_days: int = 30
 
+    # Auth (simple static token for v1)
+    notes_api_token: str = ""
+
+    # AI classifier
+    ai_provider: Literal["anthropic", "openai", "null"] = "null"
+    ai_classifier_enabled: bool = True
+    ai_classifier_model: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+
+    # Whisper STT
+    whisper_model: str = "base"
+    whisper_language: str = "auto"
+
+    @field_validator("log_level")
     @classmethod
-    def from_env(cls) -> "BackendSettings":
-        available_agents = [
-            value.strip()
-            for value in os.getenv(
-                "SIM_AVAILABLE_AGENTS",
-                "assistant-general,assistant-tech,assistant-ops",
-            ).split(",")
-            if value.strip()
-        ]
-        if not available_agents:
-            available_agents = ["assistant-general"]
+    def _upper(cls, v: str) -> str:
+        return v.upper()
 
-        audio_reply_mode = os.getenv("AUDIO_REPLY_MODE", "assistant").strip().lower()
-        if audio_reply_mode not in {"assistant", "echo"}:
-            audio_reply_mode = "assistant"
+    def effective_classifier_model(self) -> str:
+        if self.ai_classifier_model:
+            return self.ai_classifier_model
+        defaults = {
+            "anthropic": "claude-haiku-4-5-20251001",
+            "openai": "gpt-4o-mini",
+            "null": "",
+        }
+        return defaults[self.ai_provider]
 
-        return cls(
-            enable_fake_audio=_env_bool("ENABLE_FAKE_AUDIO", False),
-            loopback_audio_enabled=_env_bool("LOOPBACK_AUDIO_ENABLED", True),
-            loopback_chunk_ms=max(20, int(os.getenv("LOOPBACK_CHUNK_MS", "120"))),
-            audio_reply_mode=audio_reply_mode,
-            outbound_call_greeting=os.getenv(
-                "SIM_OUTBOUND_CALL_GREETING",
-                "Hola, soy tu asistente. ¿En qué te puedo ayudar?",
-            ).strip(),
-            device_auth_token=os.getenv("SIM_DEVICE_AUTH_TOKEN", "").strip(),
-            available_agents=available_agents,
-            allowed_device_ids={
-                value.strip()
-                for value in os.getenv("SIM_ALLOWED_DEVICE_IDS", "").split(",")
-                if value.strip()
-            },
-            log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            playback_asset_ttl_s=max(1, int(os.getenv("PLAYBACK_ASSET_TTL_S", "600"))),
-        )
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

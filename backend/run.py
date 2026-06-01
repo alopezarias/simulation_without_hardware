@@ -1,8 +1,4 @@
-"""Backend launcher bound to the current Python interpreter.
-
-Running this module avoids mismatches where `uvicorn` resolves to a different
-environment that does not have STT/TTS dependencies installed.
-"""
+"""Backend launcher — binds uvicorn to the current interpreter."""
 
 from __future__ import annotations
 
@@ -12,28 +8,23 @@ import os
 import uvicorn
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run simulation backend")
-    parser.add_argument("--host", default=os.getenv("BACKEND_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("BACKEND_PORT", "8000")))
-    parser.add_argument(
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run note-taker backend")
+    p.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
+    p.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
+    p.add_argument(
         "--reload",
         action="store_true",
-        default=os.getenv("BACKEND_RELOAD", "true").strip().lower() in {"1", "true", "yes", "on"},
-        help="Enable uvicorn auto-reload",
+        default=os.getenv("BACKEND_RELOAD", "false").strip().lower() in {"1", "true", "yes"},
     )
-    parser.add_argument(
-        "--env-file",
-        default=os.getenv("BACKEND_ENV_FILE", ".env"),
-        help="Environment file passed to uvicorn",
-    )
-    return parser.parse_args()
+    p.add_argument("--env-file", default=os.getenv("BACKEND_ENV_FILE", ".env"))
+    return p.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
+    args = _parse_args()
     uvicorn.run(
-        "backend.api:app",
+        "backend.api.app:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
